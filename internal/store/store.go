@@ -1,0 +1,219 @@
+// Package store defines storage tiers (vaults) and the on-disk model layout.
+//
+// An ark "vault" is a directory holding models in Hugging Face local-dir
+// layout:  <root>/models/<repo-slug>/... with .arkmeta.json describing the
+// source repo, revision, size and file hashes.
+package store
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// Meta is the sidecar file (.arkmeta.json) written into each model dir.
+type Meta struct {
+	Repo       string            `json:"repo"`       // e.g. "Qwen/Qwen3-32B"
+	RepoType   string            `json:"repo_type"`  // "model" | "dataset"
+	Revision   string            `json:"revision"`   // branch/tag/commit
+	Downloaded time.Time         `json:"downloaded"`
+	Engine     string            `json:"engine"`     // engine that fetched it
+	SizeBytes  int64             `json:"size_bytes"`
+	Files      int               `json:"files"`
+	Sha256     map[string]string `json:"sha256"`     // relpath -> sha256 (may be empty)
+}
+
+// Vault is one storage location (usually the local Spark tier or a NAS tier).
+type Vault struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"` // "local" | "remote"
+	Host string `json:"host,omitempty"` // empty or "local" = this machine
+	Path string `json:"path"`
+}
+
+// Remote reports whether the vault lives on another machine.
+func (v Vault) Remote() bool { return v.Host != "" && v.Host != "local" }
+
+// URL returns an rsync destination for the vault.
+func (v Vault) URL() string {
+	if v.Remote() {
+		return fmt.Sprintf("%s:%s", v.Host, v.Path)
+	}
+	return v.Path
+}
+
+// ModelsDir returns <root>/models for this vault (local paths only here).
+func (v Vault) ModelsDir() string { return filepath.Join(v.Path, "models") }
+
+// ModelDir returns the local directory of a model slug inside a vault.
+func (v Vault) ModelDir(slug string) string { return filepath.Join(v.ModelsDir(), slug) }
+
+// Slug converts a repo id ("Qwen/Qwen3-32B") to a safe directory slug.
+func Slug(repo string) string { return strings.ReplaceAll(repo, "/", "--") }
+
+// RepoFromSlug is the inverse of Slug.
+func RepoFromSlug(slug string) string { return strings.ReplaceAll(slug, "--", "/") }
+
+// Model is a discovered model entry on a vault.
+type Model struct {
+	Vault  Vault
+	Slug   string
+	Dir    string // local path if vault is local; remote path string if remote
+	Meta   *Meta
+	Status string // "ok" | "no-meta" | "remote"
+}
+
+// ReadMeta loads .arkmeta.json from a model dir (nil, nil if absent).
+func ReadMeta(modelDir string) (*Meta, error) {
+	b, err := os.ReadFile(filepath.Join(modelDir, ".arkmeta.json"))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var m Meta
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// WriteMeta writes .arkmeta.json into a model dir.
+func WriteMeta(modelDir string, m *Meta) error {
+	b, _ := json.MarshalIndent(m, "", "  ")
+	return os.WriteFile(filepath.Join(modelDir, ".arkmeta.json"), b, 0o644)
+}
+
+// DirSize sums file sizes under a path.
+func DirSize(path string) (int64, int, error) {
+	var total int64
+	var count int
+	err := filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if fi, err := d.Info(); err == nil {
+			total += fi.Size()
+			count++
+		}
+		return nil
+	})
+	return total, count, err
+}
+
+// ListLocal enumerates model dirs in a local vault.
+func ListLocal(v Vault) ([]Model, error) {
+	entries, err := os.ReadDir(v.ModelsDir())
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []Model
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(v.ModelsDir(), e.Name())
+		m, _ := ReadMeta(dir)
+		st := "ok"
+		if m == nil {
+			st = "no-meta"
+		}
+		out = append(out, Model{Vault: v, Slug: e.Name(), Dir: dir, Meta: m, Status: st})
+	}
+	return out, nil
+}
+
+// ListRemote enumerates model dirs on a remote vault via ssh ls.
+func ListRemote(v Vault, ssh func(host, cmd string) (string, error)) ([]Model, error) {
+	out, err := ssh(v.Host, fmt.Sprintf("ls -1 %q 2>/dev/null || true", v.ModelsDir()))
+	if err != nil {
+		return nil, err
+	}
+	var models []Model
+	for _, slug := range strings.Split(strings.TrimSpace(out), "\n") {
+		if slug == "" {
+			continue
+		}
+		metaOut, _ := ssh(v.Host, fmt.Sprintf("cat %q 2>/dev/null || true",
+			filepath.Join(v.ModelsDir(), slug, ".arkmeta.json")))
+		m := &Meta{}
+		status := "no-meta"
+		if json.Unmarshal([]byte(metaOut), m) == nil && m.Repo != "" {
+			status = "ok"
+		}
+		models = append(models, Model{
+			Vault: v, Slug: slug,
+			Dir: filepath.Join(v.ModelsDir(), slug),
+			Meta: m, Status: status,
+		})
+	}
+	return models, nil
+}
+
+// CopyTree hardlink-copies src to dst (same filesystem), falling back to
+// plain copy across filesystems.
+func CopyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, p)
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if link := os.Link(p, target); link == nil {
+			return nil
+		}
+		return copyFile(p, target)
+	})
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
+// Sha256File computes the sha256 hex digest of a file.
+func Sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
