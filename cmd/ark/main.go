@@ -366,7 +366,6 @@ Flags:
   --to V            Destination vault. Required unless default_to is set.
   --rev R           Revision or tag. Default: main (master on ModelScope).
   --source S        hf, hf-transfer, obscura, or modelscope. Default: auto.
-  --engine S        Old name for --source.
   --hashes          Store a sha256 manifest. ark verify needs it.
   --and-remote V    After the local copy, ship a copy to vault V too.
   --link          Also symlink the model for serving, so vLLM can find it.
@@ -638,7 +637,7 @@ func cmdList(args []string) {
 				r := modelRow{repo: store.RepoFromSlug(m.Slug), vault: name, where: v.KindLabel()}
 				if m.Meta != nil && m.Meta.Repo != "" {
 					r.size, r.rev, r.date = humanBytes(m.Meta.SizeBytes), m.Meta.Revision, m.Meta.Downloaded.Format("2006-01-02")
-					r.src = m.Meta.SourceName()
+					r.src = m.Meta.Source
 					s.bytes += m.Meta.SizeBytes
 				} else {
 					r.size, r.rev, r.date = "?", "-", "-"
@@ -670,7 +669,7 @@ func cmdList(args []string) {
 			}
 			if m.Meta != nil {
 				r.rev = m.Meta.Revision
-				if s := m.Meta.SourceName(); s != "" {
+				if s := m.Meta.Source; s != "" {
 					r.src = s
 				}
 				if !m.Meta.Downloaded.IsZero() {
@@ -793,6 +792,9 @@ func cmdDownload(args []string) {
 		die("usage: ark download <org/model> [--to vault] [--rev revision] [--source name]\nsee: ark download --help")
 	}
 	repo := pos[0]
+	if flags["engine"] != "" {
+		die("there is no --engine. Use --source %s (hf, hf-transfer, obscura, modelscope)", flags["engine"])
+	}
 	toName := cfg.DefaultTo
 	usedDefault := true
 	if v, ok := flags["to"]; ok {
@@ -816,7 +818,7 @@ func cmdDownload(args []string) {
 	if usedDefault {
 		dest += " (default_to)"
 	}
-	eng, err := source.Detect(flagOr(flags, "source", flagOr(flags, "engine", cfg.SourceName())))
+	eng, err := source.Detect(flagOr(flags, "source", cfg.Source))
 	if err != nil {
 		die("%v", err)
 	}

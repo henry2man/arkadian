@@ -24,7 +24,6 @@ type Meta struct {
 	Revision   string            `json:"revision"`  // branch/tag/commit
 	Downloaded time.Time         `json:"downloaded"`
 	Source     string            `json:"source,omitempty"` // hf | hf-transfer | obscura | modelscope
-	Engine     string            `json:"engine,omitempty"` // old key for Source, read only
 	SizeBytes  int64             `json:"size_bytes"`
 	Files      int               `json:"files"`
 	Sha256     map[string]string `json:"sha256"` // relpath -> sha256 (may be empty)
@@ -84,15 +83,6 @@ type Model struct {
 	Dir    string // local path if vault is local; remote path string if remote
 	Meta   *Meta
 	Status string // "ok" | "no-meta" | "remote"
-}
-
-// SourceName returns the source that fetched this model. Old manifests only
-// carry the "engine" key.
-func (m *Meta) SourceName() string {
-	if m.Source != "" {
-		return m.Source
-	}
-	return m.Engine
 }
 
 // ReadMeta loads .arkmeta.json from a model dir (nil, nil if absent).

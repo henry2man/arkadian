@@ -7,8 +7,7 @@ short sentences, active voice, one instruction per sentence.
 ## The Project
 
 The project is Arkadian. The command is `ark`. Keep it that way: do not rename the
-binary, `ARK_CONFIG`, `~/.arkadian/config.json`, or `.arkmeta.json`. The old config
-path `~/.ark/config.json` still loads and moves itself to the new place.
+binary, `ARK_CONFIG`, `~/.arkadian/config.json`, or `.arkmeta.json`.
 
 `ark` is a single-binary CLI in Go. It keeps Hugging Face models in local and
 remote vaults. See README.md for the full design and TODO.md for open ideas.
@@ -33,7 +32,7 @@ CI runs these checks on every push (`.github/workflows/ci.yml`).
 | Path | Content |
 |---|---|
 | `cmd/ark/main.go` | argument parsing and all subcommands |
-| `internal/config` | `~/.arkadian/config.json` load/save, legacy move from `~/.ark`, and defaults (`ARK_CONFIG` overrides the path) |
+| `internal/config` | `~/.arkadian/config.json` load/save and defaults (`ARK_CONFIG` overrides the path) |
 | `internal/source` | download sources: `hf`, `hf_transfer`, `obscura`, `modelscope` |
 | `internal/store` | vault paths, slugs, `.arkmeta.json` metadata, size, sha256, copy |
 

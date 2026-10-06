@@ -49,13 +49,14 @@ The source seam is `internal/source`. The destination seam is `store.Vault`:
 Each model stores the source that fetched it in `.arkmeta.json` (`source` key).
 A vault has no source type.
 
-- [x] Rename `engine` to `source`. `--engine` still works as an alias for `--source`.
+- [x] Rename `engine` to `source`. The flag is `--source`. No alias: nothing was
+      released, so no old command line to keep alive.
 - [x] Source: Hugging Face Hub (`hf`, `hf_transfer`, `obscura`).
 - [x] Source: ModelScope. `pip install modelscope`, then `ark download <repo>
       --source modelscope`. ModelScope defaults to the `master` revision, HF to
       `main`, so pass `--rev` when it matters.
-- [x] Config moved to `~/.arkadian/config.json`. An old `~/.ark/config.json` loads
-      once and moves itself. `ARK_CONFIG` still wins.
+- [x] Config lives in `~/.arkadian/config.json`. `ARK_CONFIG` overrides the path.
+      No migration: no released binary reads the old file.
 - [ ] Source: plain import from a directory or a file (`ark import ./weights`).
 - [ ] Source: OCI registry / `ollama pull` style registries. Later.
 - [ ] Destination: local directory (done).

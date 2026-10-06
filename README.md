@@ -65,8 +65,7 @@ vaults), and one download source in `PATH`: `hf` from `pip install huggingface_h
 
 ## First run
 
-On first use `ark` writes `~/.arkadian/config.json` with a default setup. An old
-`~/.ark/config.json` moves there on the first run.
+On first use `ark` writes `~/.arkadian/config.json` with a default setup.
 
 ```json
 {
