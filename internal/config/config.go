@@ -1,5 +1,4 @@
-// Package config loads the ark config (~/.ark/config.json by default,
-// override with ARK_CONFIG).
+// Path of the config: ~/.arkadian/config.json (ARK_CONFIG overrides the path).
 package config
 
 import (
@@ -7,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/henry2man/ark/internal/store"
+	"github.com/henry2man/arkadian/internal/store"
 )
 
 const (
@@ -18,23 +17,42 @@ const (
 
 // Config is the ark CLI configuration.
 type Config struct {
-	Vaults      map[string]store.Vault `json:"vaults"`       // name -> vault
-	DefaultFrom string                 `json:"default_from"` // download source vault
-	DefaultTo   string                 `json:"default_to"`   // download destination vault
-	Engine      string                 `json:"engine"`       // "" = auto-detect
-	RsyncFlags  string                 `json:"rsync_flags"`  // extra flags
+	Vaults      map[string]store.Vault `json:"vaults"`           // name -> vault
+	DefaultFrom string                 `json:"default_from"`     // download source vault
+	DefaultTo   string                 `json:"default_to"`       // download destination vault
+	Engine      string                 `json:"engine,omitempty"` // old name of Source, still read
+	Source      string                 `json:"source,omitempty"` // "" = auto-detect
+	RsyncFlags  string                 `json:"rsync_flags"`      // extra flags
 }
 
-// Path returns the config file path.
+// SourceName returns the preferred download source ("" = auto-detect).
+func (c *Config) SourceName() string {
+	if c.Source != "" {
+		return c.Source
+	}
+	return c.Engine
+}
+
+// Path returns the config file path. ARK_CONFIG wins. Otherwise use
+// ~/.arkadian/config.json, or the old ~/.ark/config.json while it exists.
 func Path() string {
 	if p := os.Getenv("ARK_CONFIG"); p != "" {
 		return p
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".ark", "config.json")
+	p := filepath.Join(home, ".arkadian", "config.json")
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	legacy := filepath.Join(home, ".ark", "config.json")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	return p
 }
 
-// Load reads the config, bootstrapping a default one on first use.
+// Load reads the config. On first use it bootstraps a default file. An old
+// ~/.ark/config.json moves to ~/.arkadian/config.json.
 func Load() (*Config, error) {
 	p := Path()
 	b, err := os.ReadFile(p)
@@ -51,7 +69,16 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.applyDefaults()
+	if legacyConfig(p) {
+		_ = c.Save() // move to the new home
+	}
 	return &c, nil
+}
+
+// legacyConfig reports whether p is the old ~/.ark/config.json path.
+func legacyConfig(p string) bool {
+	home, _ := os.UserHomeDir()
+	return p == filepath.Join(home, ".ark", "config.json")
 }
 
 // Default is the out-of-the-box config: a local tier and one remote tier.
@@ -67,14 +94,40 @@ func Default() *Config {
 	}
 }
 
-// Save writes the config to disk.
+// Save writes the config to the new path, then removes the old file.
 func (c *Config) Save() error {
-	p := Path()
+	p := c.path()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
 	b, _ := json.MarshalIndent(c, "", "  ")
-	return os.WriteFile(p, b, 0o644)
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		return err
+	}
+	if legacy := legacyPath(); legacy != "" && legacy != p {
+		_ = os.Remove(legacy) // one move, no split-brain
+	}
+	return nil
+}
+
+// path is where this config should live now: always the new home,
+// unless ARK_CONFIG points elsewhere.
+func (c *Config) path() string {
+	if p := os.Getenv("ARK_CONFIG"); p != "" {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".arkadian", "config.json")
+}
+
+// legacyPath returns the old config path when that file exists.
+func legacyPath() string {
+	home, _ := os.UserHomeDir()
+	p := filepath.Join(home, ".ark", "config.json")
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return ""
 }
 
 func (c *Config) applyDefaults() {

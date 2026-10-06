@@ -1,0 +1,32 @@
+name: release
+
+# Not published yet: the repo is private, so start the release by hand
+# (Actions → Release → Run workflow). When the repo goes public, replace the
+# trigger with:  on: { push: { tags: ['v*'] } }
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write # publish the GitHub Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags and history for the changelog
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Not used yet. Enable it together with the Homebrew block in
+          # .goreleaser.yaml: a token with write access to henry2man/homebrew-arkadian.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

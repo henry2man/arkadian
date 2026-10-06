@@ -1,0 +1,68 @@
+# GoReleaser config — https://goreleaser.com
+# Local test, no publish: goreleaser release --snapshot --clean --skip=publish
+version: 2
+
+# The display name is Arkadian. The command, the archives, and the cask keep the
+# short name ark.
+project_name: ark
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: ark
+    main: ./cmd/ark
+    binary: ark
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # No windows: ark shells out to rsync and ssh.
+
+archives:
+  - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^chore:'
+      - '^test:'
+
+release:
+  name_template: "{{ .Tag }}"
+
+# Homebrew: disabled while the repo is private. Homebrew cannot read a private
+# repo, so this needs the repo public plus the tap repo henry2man/homebrew-arkadian.
+# To enable: uncomment the block below, add the HOMEBREW_TAP_GITHUB_TOKEN
+# secret, and remove the same comment mark in .github/workflows/release.yml.
+# Then users run: brew tap henry2man/arkadian && brew install --cask arkadian
+# The cask is arkadian. The command it installs is ark.
+#homebrew_casks:
+#  - name: arkadian
+#    repository:
+#      owner: henry2man
+#      name: homebrew-arkadian
+#      branch: main
+#      # Repository secret: PAT with write access to henry2man/homebrew-arkadian.
+#      # The tap repository must exist before the first release.
+#      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+#    directory: Casks
+#    Homebrew now expects Casks/cask_arkadian.rb. Check the file name goreleaser
+#    writes in dist/homebrew/ on the first real release.
+#    homepage: https://github.com/henry2man/arkadian
+#    description: Custody of Hugging Face models across local and remote vaults
+#    license: MIT
+

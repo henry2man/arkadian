@@ -19,26 +19,43 @@ import (
 
 // Meta is the sidecar file (.arkmeta.json) written into each model dir.
 type Meta struct {
-	Repo       string            `json:"repo"`       // e.g. "Qwen/Qwen3-32B"
-	RepoType   string            `json:"repo_type"`  // "model" | "dataset"
-	Revision   string            `json:"revision"`   // branch/tag/commit
+	Repo       string            `json:"repo"`      // e.g. "Qwen/Qwen3-32B"
+	RepoType   string            `json:"repo_type"` // "model" | "dataset"
+	Revision   string            `json:"revision"`  // branch/tag/commit
 	Downloaded time.Time         `json:"downloaded"`
-	Engine     string            `json:"engine"`     // engine that fetched it
+	Source     string            `json:"source,omitempty"` // hf | hf-transfer | obscura | modelscope
+	Engine     string            `json:"engine,omitempty"` // old key for Source, read only
 	SizeBytes  int64             `json:"size_bytes"`
 	Files      int               `json:"files"`
-	Sha256     map[string]string `json:"sha256"`     // relpath -> sha256 (may be empty)
+	Sha256     map[string]string `json:"sha256"` // relpath -> sha256 (may be empty)
 }
 
 // Vault is one storage location (usually the local Spark tier or a NAS tier).
 type Vault struct {
 	Name string `json:"name"`
-	Kind string `json:"kind"` // "local" | "remote"
+	Kind string `json:"kind"`           // "local" | "remote"
 	Host string `json:"host,omitempty"` // empty or "local" = this machine
 	Path string `json:"path"`
 }
 
 // Remote reports whether the vault lives on another machine.
 func (v Vault) Remote() bool { return v.Host != "" && v.Host != "local" }
+
+// KindLabel names the vault kind for output: local, samba, or remote.
+// A samba vault is a mounted path, so it behaves like a local vault.
+func (v Vault) KindLabel() string {
+	if v.Remote() {
+		return "remote"
+	}
+	switch v.Kind {
+	case "", "local":
+		return "local"
+	case "cifs", "mount", "smb":
+		return "samba"
+	default:
+		return v.Kind
+	}
+}
 
 // URL returns an rsync destination for the vault.
 func (v Vault) URL() string {
@@ -67,6 +84,15 @@ type Model struct {
 	Dir    string // local path if vault is local; remote path string if remote
 	Meta   *Meta
 	Status string // "ok" | "no-meta" | "remote"
+}
+
+// SourceName returns the source that fetched this model. Old manifests only
+// carry the "engine" key.
+func (m *Meta) SourceName() string {
+	if m.Source != "" {
+		return m.Source
+	}
+	return m.Engine
 }
 
 // ReadMeta loads .arkmeta.json from a model dir (nil, nil if absent).
@@ -122,10 +148,13 @@ func ListLocal(v Vault) ([]Model, error) {
 	}
 	var out []Model
 	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
 		dir := filepath.Join(v.ModelsDir(), e.Name())
+		if !e.IsDir() {
+			// a virtual promote leaves a symlink here: that is a model dir too
+			if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+				continue
+			}
+		}
 		m, _ := ReadMeta(dir)
 		st := "ok"
 		if m == nil {
@@ -156,16 +185,23 @@ func ListRemote(v Vault, ssh func(host, cmd string) (string, error)) ([]Model, e
 		}
 		models = append(models, Model{
 			Vault: v, Slug: slug,
-			Dir: filepath.Join(v.ModelsDir(), slug),
+			Dir:  filepath.Join(v.ModelsDir(), slug),
 			Meta: m, Status: status,
 		})
 	}
 	return models, nil
 }
 
-// CopyTree hardlink-copies src to dst (same filesystem), falling back to
-// plain copy across filesystems.
-func CopyTree(src, dst string) error {
+// CopyTree copies src to dst, hardlinking files when both sides sit on one
+// filesystem. Fast and cheap. Use it when the source goes away: staging into a
+// vault, or a move.
+func CopyTree(src, dst string) error { return copyTree(src, dst, true) }
+
+// CopyTreeFull copies bytes. No hardlinks, so each copy stands on its own and
+// survives the loss of the other. promote and demote use it.
+func CopyTreeFull(src, dst string) error { return copyTree(src, dst, false) }
+
+func copyTree(src, dst string, allowLinks bool) error {
 	return filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -175,11 +211,33 @@ func CopyTree(src, dst string) error {
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
-		if link := os.Link(p, target); link == nil {
-			return nil
+		if allowLinks {
+			if link := os.Link(p, target); link == nil {
+				return nil
+			}
 		}
 		return copyFile(p, target)
 	})
+}
+
+// RemoveModel deletes a model dir and its empty slug parent. It refuses to
+// touch anything outside <vault>/models.
+func RemoveModel(v Vault, slug string) error {
+	dir := v.ModelDir(slug)
+	models := v.ModelsDir()
+	if !inside(models, dir) || dir == models {
+		return fmt.Errorf("refusing to delete %s: not inside %s", dir, models)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	return nil
+}
+
+// inside reports whether path sits under root.
+func inside(root, path string) bool {
+	root, path = filepath.Clean(root), filepath.Clean(path)
+	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
 func copyFile(src, dst string) error {
