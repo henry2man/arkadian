@@ -51,6 +51,10 @@ Add new subcommands in `cmd/ark/main.go`. Put reusable logic in `internal/`.
 7. Write the least code that works. This project uses Ponytail: see the ladder in
    README.md. Do not add an abstraction nobody asked for. Mark a deliberate
    shortcut with a `// ponytail:` comment that names the ceiling and the fix.
+8. The command set is the API: `list`, `download`, `mv`, `rm`, `path`, `link`,
+   `unlink`, `verify`, `info`, `vault`, `version`. No aliases, no second verb for
+   one job, no flags that repeat another command. A new verb needs a job these
+   cannot do. PLAN.md holds the reasoning.
 
 ## Releases
 

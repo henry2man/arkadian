@@ -17,14 +17,14 @@ Hugging Face itself disappears.
 ## The model
 
 ```
-                 ark download Qwen/Qwen3-32B --and-remote nas
+                 ark download Qwen/Qwen3-32B --to spark
                  │ (source: hf / hf_transfer / obscura / modelscope)
                  ▼
-   ┌─────────────────────┐   ark demote (rsync)   ┌──────────────────────────┐
-   │ vault: spark (local) │ ◄──────────────────►  │ vault: nas (remote, ssh)  │
-   │ ~/ark/spark/models/  │   ark promote (rsync) │ /volume1/ark/models/       │
-   │  Qwen--Qwen3-32B/    │                       │  Qwen--Qwen3-32B/          │
-   └─────────┬───────────┘                        └──────────────────────────┘
+   ┌─────────────────────┐    ark mv --from spark --to nas    ┌──────────────────────────┐
+   │ vault: spark (local) │ ─────────────────────────────►   │ vault: nas (remote, ssh)  │
+   │ ~/ark/spark/models/  │ ◄─────────────────────────────    │ /volume1/ark/models/       │
+   │  Qwen--Qwen3-32B/    │    ark mv --from nas --to spark   │  Qwen--Qwen3-32B/          │
+   └─────────┬───────────┘    ark mv ... --link = no bytes    └──────────────────────────┘
              │ ark link
              ▼
    ~/ark/models/Qwen/Qwen3-32B  ──symlink──►  served offline (HF_HUB_OFFLINE=1)
@@ -38,11 +38,15 @@ Hugging Face itself disappears.
 - **Sources**: Hugging Face (`hf`, `hf_transfer`, `obscura`) and ModelScope
   (`--source modelscope`). A vault does not have a source type: each model keeps the
   source that fetched it in its own `.arkmeta.json`.
+- **One verb moves models**: `ark mv <repo> --from A --to B`. Any end works: local,
+  samba, or remote. Remote to remote streams through this machine with rsync and
+  needs no local disk. `ark rm <repo>` is the other half: it frees the space.
 - **Two kinds of symlink**. `ark link` makes a link for *serving*: a path in
-  `~/ark/models` that points at the vault copy. `ark promote --link` makes a link
-  inside a *vault*: the model shows up in the local vault and costs no space. Both
-  need a path the machine can open, so they work with local and mounted vaults, not
-  with an ssh vault. A link is not a backup: the bytes live in one place.
+  `~/ark/models` that points at the vault copy. `ark mv --link` makes a link
+  inside a *vault*: the model shows up there and costs no space, and the source
+  vault keeps the bytes. Both need a path the machine can open, so they work with
+  local and mounted vaults, not with an ssh vault. A link is not a backup: the
+  bytes live in one place. `ark unlink` removes a serving link.
 - **Manifests**: `--hashes` stores a sha256 manifest (`.arkmeta.json`); `ark verify`
   detects NAS bit-rot.
 
@@ -85,7 +89,7 @@ Set `"source": "modelscope"` to make ModelScope the default download source.
 
 1. DSM → Control Panel → **Terminal & SNMP** → enable SSH.
 2. `ssh-copy-id user@nas` (ark uses BatchMode ssh; no interactive passwords).
-3. First `demote`/`download` creates `/volume1/ark/models` automatically.
+3. First `mv`/`download` creates `/volume1/ark/models` automatically.
 
 SMB/CIFS is *not* required (rsync-over-ssh is faster and preserves HF hardlinks).
 You can still point a `local`-kind vault at a mounted CIFS path if you prefer —
@@ -98,23 +102,22 @@ You can still point a `local`-kind vault at a mounted CIFS path if you prefer �
 | Command | What it does |
 |---|---|
 | `ark list` | Size per model, size per vault, free disk space, and the copies that are at risk |
-| `ark vault ls` | Name, kind, and path of every vault |
-| `ark download <repo> --to V [--rev R] [--source S] [--hashes] [--and-remote V] [--link]` | Fetch from HF or ModelScope into staging, then into the vault |
-| `ark promote <repo> --from V [--local V] [--link]` | Vault → local tier. The "load model" move. `--link` = virtual: a symlink in the local vault, no bytes, no space |
-| `ark demote <repo> --from V --to V` | Local tier → vault. The "unload model" move |
-| `ark model ls` | Same as `ark list` |
-| `ark model download <repo> [--flags]` | Same as `ark download` |
-| `ark model path <repo> [--vault V]` | Path of one model, local or `host:path` |
-| `ark model mv <repo> --from V --to V` | Move between two vaults. Asks first, `--yes` skips it |
-| `ark model rm <repo> [--vault V] [--yes]` | Delete a model. Asks first, `--yes` skips it |
+| `ark download <repo> --to V [--rev R] [--source S] [--hashes]` | Fetch from HF or ModelScope into staging, then into the vault |
+| `ark mv <repo> --from A --to B [--link] [--yes]` | The one move verb. Copies, then deletes the source. `--link` = a symlink in B, A keeps the bytes, no space used |
+| `ark rm <repo> [--vault V] [--yes]` | Delete a model to free space. Asks first, `--yes` skips it |
+| `ark path <repo> [--vault V]` | Path of one model, local or `host:path` — what vLLM needs |
 | `ark link <repo> [--dir DIR]` | Symlink a model → `~/ark/models/<org>/<name>`, then print the two exports to serve it offline |
+| `ark unlink <repo> [--dir DIR]` | Remove that symlink. Refuses a real directory |
 | `ark verify [repo]` | sha256 check against the manifest. Bit-rot sweep |
 | `ark info <repo>` | Stored metadata as JSON |
+| `ark vault ls` | Name, kind, and path of every vault |
 | `ark vault add <name> local <path>` | A directory on this machine |
 | `ark vault add <name> samba <path>` | A mounted CIFS/SMB/NFS path |
 | `ark vault add <name> <user@host> <path>` | A remote machine, rsync over ssh |
 | `ark vault rm <name> [--yes]` | Drop a vault from the config. Never deletes files |
 | `ark version` | Version, one-line about, and the repo link |
+
+Ten commands, no aliases, no second way to do the same thing.
 
 ### Conventions
 
@@ -129,14 +132,17 @@ You can still point a `local`-kind vault at a mounted CIFS path if you prefer �
 ### Example flow
 
 ```bash
-ark download Qwen/Qwen3-8B --hashes --and-remote nas   # HF -> local -> NAS
-ark download Qwen/Qwen3-8B --source modelscope         # same model, from ModelScope
-ark demote  Qwen/Qwen3-8B                              # (if you forgot --and-remote)
-ark list                                               # sizes per vault + free space
-ark link Qwen/Qwen3-8B                                 # symlink + the export lines
+ark vault add spark local ~/ark/spark                   # fast disk, where you work
+ark vault add nas   user@nas:/volume1/ark     # the cold copy, over ssh
+ark download Qwen/Qwen3-8B --hashes --to spark          # HF -> local vault
+ark mv Qwen/Qwen3-8B --from spark --to nas              # cold copy on the NAS, free the disk
+ark list                                                # sizes per vault + free space
+ark mv Qwen/Qwen3-8B --from nas --to spark --link       # load it back without the bytes
+ark link Qwen/Qwen3-8B                                  # symlink + the export lines
 export HF_HUB_OFFLINE=1
-vllm serve $(ark model path Qwen/Qwen3-8B) ...          # fully offline
-ark verify                                             # monthly cron: bit-rot sweep
+vllm serve $(ark path Qwen/Qwen3-8B) ...                 # fully offline
+ark verify                                              # monthly cron: bit-rot sweep
+ark rm Qwen/Qwen3-8B --vault spark                      # done with it: free the space
 ```
 
 ## How this code is written

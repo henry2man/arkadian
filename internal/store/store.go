@@ -78,11 +78,10 @@ func RepoFromSlug(slug string) string { return strings.ReplaceAll(slug, "--", "/
 
 // Model is a discovered model entry on a vault.
 type Model struct {
-	Vault  Vault
-	Slug   string
-	Dir    string // local path if vault is local; remote path string if remote
-	Meta   *Meta
-	Status string // "ok" | "no-meta" | "remote"
+	Vault Vault
+	Slug  string
+	Dir   string // local path if the vault is local; remote path string if remote
+	Meta  *Meta
 }
 
 // ReadMeta loads .arkmeta.json from a model dir (nil, nil if absent).
@@ -140,17 +139,13 @@ func ListLocal(v Vault) ([]Model, error) {
 	for _, e := range entries {
 		dir := filepath.Join(v.ModelsDir(), e.Name())
 		if !e.IsDir() {
-			// a virtual promote leaves a symlink here: that is a model dir too
+			// a link move (ark mv --link) leaves a symlink here: that is a model dir too
 			if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 				continue
 			}
 		}
 		m, _ := ReadMeta(dir)
-		st := "ok"
-		if m == nil {
-			st = "no-meta"
-		}
-		out = append(out, Model{Vault: v, Slug: e.Name(), Dir: dir, Meta: m, Status: st})
+		out = append(out, Model{Vault: v, Slug: e.Name(), Dir: dir, Meta: m})
 	}
 	return out, nil
 }
@@ -169,29 +164,20 @@ func ListRemote(v Vault, ssh func(host, cmd string) (string, error)) ([]Model, e
 		metaOut, _ := ssh(v.Host, fmt.Sprintf("cat %q 2>/dev/null || true",
 			filepath.Join(v.ModelsDir(), slug, ".arkmeta.json")))
 		m := &Meta{}
-		status := "no-meta"
-		if json.Unmarshal([]byte(metaOut), m) == nil && m.Repo != "" {
-			status = "ok"
-		}
+		json.Unmarshal([]byte(metaOut), m)
 		models = append(models, Model{
 			Vault: v, Slug: slug,
 			Dir:  filepath.Join(v.ModelsDir(), slug),
-			Meta: m, Status: status,
+			Meta: m,
 		})
 	}
 	return models, nil
 }
 
 // CopyTree copies src to dst, hardlinking files when both sides sit on one
-// filesystem. Fast and cheap. Use it when the source goes away: staging into a
-// vault, or a move.
-func CopyTree(src, dst string) error { return copyTree(src, dst, true) }
-
-// CopyTreeFull copies bytes. No hardlinks, so each copy stands on its own and
-// survives the loss of the other. promote and demote use it.
-func CopyTreeFull(src, dst string) error { return copyTree(src, dst, false) }
-
-func copyTree(src, dst string, allowLinks bool) error {
+// filesystem, and copying bytes when they do not. It is a move: the source is
+// safe to delete afterwards, the bytes live on in the destination.
+func CopyTree(src, dst string) error {
 	return filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -201,10 +187,8 @@ func copyTree(src, dst string, allowLinks bool) error {
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
-		if allowLinks {
-			if link := os.Link(p, target); link == nil {
-				return nil
-			}
+		if link := os.Link(p, target); link == nil {
+			return nil // same filesystem: one inode, no bytes copied
 		}
 		return copyFile(p, target)
 	})

@@ -64,12 +64,12 @@ A vault has no source type.
 - [x] Destination: Samba/CIFS mount. `ark vault add <n> samba <mounted-path>`. It is
       a local path in the code, so `ark list` labels it `samba`. Hardlink dedup does
       not work on CIFS; the vault just holds files.
-- [ ] Vault to vault without the local tier. `ark model mv --from A --to B` works
-      when at least one end is a path on this machine (local or samba). Remote to
-      remote still needs two steps: promote, then demote. Review a direct copy with
-      rsync through an ssh ProxyJump, or run `ark` on a host that sees both. Check
-      three things first: who pays the bandwidth, what happens on a broken pipe, and
-      whether hardlinks survive. Keep `promote`/`demote` as the simple path.
+- [x] API collapse to ten commands (see PLAN.md). `promote`, `demote`, `ark model`,
+      `serve`, `--and-remote`, and the aliases `dl pull down push models` are gone.
+      One verb moves (`ark mv`), one deletes (`ark rm`). Old names print the new one.
+- [x] Vault to vault without the local tier. `ark mv --from A --to B` takes any pair.
+      Remote to remote runs one `rsync hostA:path hostB:path`: it streams through this
+      machine and uses no local disk. `mv --link` moves with no bytes at all.
 - [ ] Destination: S3 compatible store (MinIO, Cloudflare R2, Wasabi). **v2.**
       Needs multipart upload and its own verify path. Out of v1.
 - [ ] One `ark doctor` command: print which sources are installed and which
