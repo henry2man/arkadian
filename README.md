@@ -111,9 +111,10 @@ You can still point a `local`-kind vault at a mounted CIFS path if you prefer â€
 | `ark verify [repo]` | sha256 check against the manifest. Bit-rot sweep |
 | `ark info <repo>` | Stored metadata as JSON |
 | `ark vault ls` | Name, kind, and path of every vault |
-| `ark vault add <name> local <path>` | A directory on this machine |
-| `ark vault add <name> samba <path>` | A mounted CIFS/SMB/NFS path |
-| `ark vault add <name> <user@host> <path>` | A remote machine, rsync over ssh |
+| `ark vault add <name> <location>` | One location, one word: `/data/ark`, `~/ark`, `user@host:/path`, or `ssh://user@host/path` |
+| `ark vault add <name> local <path>` | The two-word spelling of a directory on this machine |
+| `ark vault add <name> samba <path>` | The two-word spelling of a mounted CIFS/SMB/NFS path |
+| `ark vault add <name> <user@host> <path>` | The two-word spelling of a remote machine, rsync over ssh |
 | `ark vault rm <name> [--yes]` | Drop a vault from the config. Never deletes files |
 | `ark version` | Version, one-line about, and the repo link |
 
@@ -132,7 +133,7 @@ Ten commands, no aliases, no second way to do the same thing.
 ### Example flow
 
 ```bash
-ark vault add spark local ~/ark/spark                   # fast disk, where you work
+ark vault add spark ~/ark/spark                         # fast disk, where you work
 ark vault add nas   user@nas:/volume1/ark     # the cold copy, over ssh
 ark download Qwen/Qwen3-8B --hashes --to spark          # HF -> local vault
 ark mv Qwen/Qwen3-8B --from spark --to nas              # cold copy on the NAS, free the disk

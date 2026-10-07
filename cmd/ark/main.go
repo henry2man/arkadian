@@ -363,8 +363,11 @@ func mustVault(flags map[string]string, flag, def string) store.Vault {
 	if err == nil {
 		return v
 	}
-	if strings.HasPrefix(name, "/") || strings.HasPrefix(name, "~") || strings.HasPrefix(name, ".") {
-		return store.Vault{Name: name, Kind: "local", Path: config.Expand(name)}
+	if strings.Contains(name, "://") || strings.Contains(name, ":/") ||
+		strings.HasPrefix(name, "/") || strings.HasPrefix(name, "~") || strings.HasPrefix(name, ".") {
+		v = parseLocation(name, name) // the same spellings `ark vault add` takes
+		v.Name = name
+		return v
 	}
 	die("%v. Run: ark vault ls", err)
 	return store.Vault{}
@@ -490,20 +493,26 @@ prints as user@host:path. A model in two vaults needs --vault.
 	helpVault = `usage: ark vault <subcommand> [args]
 
   ark vault ls                       Name, kind, and path of every vault
-  ark vault add <name> <local|samba> <path>
-  ark vault add <name> <user@host> <path>   remote, rsync over ssh
+  ark vault add <name> <location>    A path (/data, ~/, ./), a remote
+                                     host:/path, or ssh://user@host/path.
+                                     smb:// and nfs:// name a protocol ark does
+                                     not speak: mount them, then add the
+                                     mount point.
+  ark vault add <name> <local|samba> <path>   the two-word spelling
+  ark vault add <name> <user@host> <path>     the two-word spelling
   ark vault rm <name>                Drop a vault from the config. Asks first
 
 Kinds:
   local   A directory on this machine.
   samba   A mounted path (CIFS/SMB or NFS). Used like a local dir.
-  host    Anything else: user@host, rsync over ssh. <path> is the remote dir.
+  remote  user@host, rsync over ssh. The path is the remote dir.
 
 A vault holds models. It has no download source. The source lives per model.
 
 Examples:
-  ark vault add usb samba /mnt/usb
+  ark vault add usb /mnt/usb
   ark vault add lab user@192.0.2.10 /vol1/models
+  ark vault add lab ssh://user@192.0.2.10/vol1/models
 `
 )
 
@@ -1026,6 +1035,45 @@ func cmdInfo(args []string) {
 	fmt.Println(string(b))
 }
 
+// parseLocation reads a one-argument vault location: a path, host:/path, or
+// ssh://[user@host]/path. smb:// and friends name a protocol ark does not
+// speak: that one needs a mount first.
+func parseLocation(name, loc string) store.Vault {
+	if i := strings.Index(loc, "://"); i >= 0 {
+		scheme, rest := strings.ToLower(loc[:i]), loc[i+3:]
+		switch scheme {
+		case "file":
+			return store.Vault{Kind: "local", Path: config.Expand(rest)}
+		case "ssh":
+			host, path := rest, ""
+			if slash := strings.Index(rest, "/"); slash >= 0 {
+				// keep the leading slash: a remote path stays absolute
+				host, path = rest[:slash], rest[slash:]
+			}
+			if path == "" {
+				usageErr("ssh://%s carries no path. Use: ark vault add %s ssh://<user@host>/<path>", host, name)
+			}
+			if host == "" {
+				host = "localhost"
+			}
+			return store.Vault{Kind: "remote", Host: host, Path: path}
+		default:
+			usageErr("%s:// names a protocol ark does not speak. Mount the share, then:\n  ark vault add %s samba <mounted-path>", scheme, name)
+		}
+	}
+	switch path := config.Expand(loc); {
+	case strings.HasPrefix(loc, "/") || strings.HasPrefix(loc, "~") || strings.HasPrefix(loc, "."):
+		return store.Vault{Kind: "local", Path: path}
+	case strings.Contains(loc, ":"): // the rsync spelling: host:/path
+		host, remote, ok := strings.Cut(loc, ":")
+		if ok && strings.HasPrefix(remote, "/") {
+			return store.Vault{Kind: "remote", Host: host, Path: remote}
+		}
+	}
+	usageErr("%s is not a vault location. Use one of:\n  ark vault add %s <path>\n  ark vault add %s <user@host> <path>\n  ark vault add %s ssh://<user@host>/<path>", loc, name, name, name)
+	return store.Vault{}
+}
+
 func cmdVault(args []string) {
 	if len(args) == 0 {
 		fmt.Print(helpVault)
@@ -1041,22 +1089,29 @@ func cmdVault(args []string) {
 			fmt.Printf("%-10s %-7s %s\n", n, v.KindLabel(), v.URL())
 		}
 	case "add":
-		if len(args) < 4 {
-			usageErr("usage:\n  ark vault add <name> local <path>\n  ark vault add <name> samba <mounted-path>\n  ark vault add <name> <user@host> <path>")
+		if len(args) == 3 {
+			cfg.Vaults[args[1]] = parseLocation(args[1], args[2])
+		} else if len(args) < 4 {
+			usageErr("usage:\n  ark vault add <name> <path>\n  ark vault add <name> local <path>\n  ark vault add <name> samba <mounted-path>\n  ark vault add <name> <user@host> <path>\n  ark vault add <name> ssh://<user@host>/<path>")
+		} else {
+			v := store.Vault{Kind: "local"}
+			switch kind := strings.ToLower(args[2]); kind {
+			case "local":
+				v.Path = config.Expand(args[3])
+			case "samba", "smb", "mount", "cifs":
+				v.Kind = "samba" // a mounted path: same code path as local
+				v.Path = config.Expand(args[3])
+			case "remote": // the old 4-word spelling: point at the short one
+				usageErr("no remote keyword. Use: ark vault add %s <user@host> <path>", args[1])
+			default: // a host in the kind slot: user@host
+				if strings.Contains(args[2], "://") {
+					usageErr("one location is enough: ark vault add %s ssh://<user@host>/<path>", args[1])
+				}
+				v.Kind, v.Host, v.Path = "remote", args[2], args[3]
+			}
+			cfg.Vaults[args[1]] = v
 		}
-		v := store.Vault{Kind: "local"}
-		switch kind := strings.ToLower(args[2]); kind {
-		case "local":
-			v.Path = config.Expand(args[3])
-		case "samba", "smb", "mount", "cifs":
-			v.Kind = "samba" // a mounted path: same code path as local
-			v.Path = config.Expand(args[3])
-		case "remote": // the old 4-word spelling: point at the short one
-			usageErr("no remote keyword. Use: ark vault add %s <user@host> <path>", args[1])
-		default: // a host in the kind slot: user@host or host:/path
-			v.Kind, v.Host, v.Path = "remote", args[2], args[3]
-		}
-		cfg.Vaults[args[1]] = v
+		v := cfg.Vaults[args[1]]
 		if err := cfg.Save(); err != nil {
 			die("%v", err)
 		}
