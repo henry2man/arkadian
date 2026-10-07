@@ -110,3 +110,13 @@ func TestGetMaterializesReference(test *testing.T) {
 		test.Fatal("get removed source", err)
 	}
 }
+
+func TestUnknownCommandHint(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := execute([]string{"download"}, nil, &out, &errOut); code != 2 {
+		t.Fatalf("exit code %d, want 2", code)
+	}
+	if !strings.Contains(errOut.String(), "use ark pull") {
+		t.Fatalf("stderr %q, want a pull hint", errOut.String())
+	}
+}

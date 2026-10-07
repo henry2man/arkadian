@@ -64,8 +64,9 @@ HF also supports some one-component identifiers. These are not aliases.
 - Keep `--help`, exit 0 for success, 1 for errors, and 2 for invalid usage.
 - Keep diagnostics on stderr. Keep `path` and `list --json` stdout composable.
 - Confirm destructive operations. `--yes` skips questions, never safety checks.
-- Retire `download`, `load`, `link`, `unlink`, `info`, and `mv --link`.
-  Explain their replacements. Use list filters instead of adding `where`.
+- Do not add `download`, `load`, `link`, `unlink`, `info`, `where`, or
+  `mv --link`. Unknown names point to the command to use. Use list filters
+  instead of adding `where`.
 
 ## Data and Operation Contracts
 
@@ -175,7 +176,7 @@ Otherwise require `--rev`. A remote path is an SSH location, not a local mount.
 
 - [x] Add shared resumable transfer and offline local/remote verification.
 - [x] Add positional cp, mv, rm, sync, get, and evict with safety guards.
-- [x] Add local/remote pull, path selection, and retired-command guidance.
+- [x] Add local/remote pull, path selection, and unknown-command hints.
 
 ### Phase 4 — Validate the restructuring
 
@@ -282,5 +283,5 @@ Do not commit, merge, change repository visibility, or publish as a side effect
 of CLI implementation. Keep release notes generated from commits.
 
 Future work lives in README.md under Future ideas. This plan is the only task
-list. Earlier alias verbs, serving links, local staging for remote downloads,
-alternative providers, and optional transfer flags are superseded.
+list. Alias verbs, serving links, local staging for remote downloads,
+alternative providers, and optional transfer flags are out of V1.

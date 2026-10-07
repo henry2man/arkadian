@@ -38,10 +38,11 @@ var usages = map[string]string{
 	"version": "version",
 }
 
-var removed = map[string]string{
+// hints maps names a person may guess to the command that works.
+var hints = map[string]string{
 	"download": "ark pull hf://org/model <destination>", "load": "ark get <model>",
-	"link":   "mount the source, then use ark path <model> --vault <source> and ln -s",
-	"unlink": "remove the link with unlink or rm", "info": "ark list <model> --json",
+	"link":   "ark path <model> --vault <source>, then ln -s",
+	"unlink": "unlink <path>", "info": "ark list <model> --json",
 	"where": "ark list <model>", "ls": "ark list", "move": "ark mv", "remove": "ark rm",
 	"promote": "ark get <model>", "demote": "ark evict <model> <destination>",
 	"model": "ark list, ark pull, ark cp, ark mv, ark rm", "models": "ark list",
@@ -141,8 +142,8 @@ func execute(args []string, input io.Reader, output, diagnostics io.Writer) int 
 		command = "version"
 	}
 	if _, found := usages[command]; !found {
-		if replacement, found := removed[command]; found {
-			fmt.Fprintf(diagnostics, "ark %s is retired; use: %s\n", command, replacement)
+		if replacement, found := hints[command]; found {
+			fmt.Fprintf(diagnostics, "unknown command %q; use %s\n", command, replacement)
 		} else {
 			fmt.Fprintf(diagnostics, "unknown command %q\n", command)
 		}

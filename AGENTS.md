@@ -49,7 +49,8 @@ command. Report actual checks and skipped hardware checks separately.
 6. Publish transfers only after verification. Recheck source before deletion.
 7. Do not count references as independent copies. Never delete a link target.
 8. Preserve the API in PLAN.md. No model aliases, duplicate verbs, or transfer
-   flags that repeat positional arguments. Retired commands explain replacements.
+   flags that repeat positional arguments. Unknown names point to the command
+   to use.
 9. Keep the 90% space limit in code. Force does not bypass integrity or conflicts.
 10. Fail with an actionable error. Do not panic. Invalid usage exits 2.
 11. Mark a deliberate real shortcut with a ponytail comment naming its ceiling

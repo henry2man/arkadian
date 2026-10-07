@@ -111,9 +111,9 @@ transfer verification or allows conflict overwrites.
 Diagnostics go to stderr. `path` prints only its result to stdout. `list --json`
 returns the filtered inventory. Exit codes: 0 success, 1 failure, 2 bad usage.
 
-`download`, `load`, `link`, `unlink`, and `info` are retired. Their errors show
-replacements. Use `get` for a real local copy, `ln` for links, and `list --json`
-for structured model information.
+Use `pull` to download, `get` to bring a copy into the default working vault,
+`ln` for links, and `list --json` for structured model information. An unknown
+name prints the command to use.
 
 ## Inventory and integrity
 
