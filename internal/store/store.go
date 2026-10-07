@@ -458,116 +458,133 @@ func RoomOK(total, free, need int64, force bool) error {
 	return nil
 }
 
-func Transfer(repo string, source, destination Vault, move, force bool) error {
+type TransferResult struct {
+	Repo        string
+	Source      string
+	Destination string
+	Action      string // "copied", "moved", "already present", "verified"
+	SizeBytes   int64
+}
+
+func Transfer(repo string, source, destination Vault, move, force bool) (*TransferResult, error) {
+	result := &TransferResult{Repo: repo, Source: source.Name, Destination: destination.Name}
 	if err := ValidateRepo(repo); err != nil {
-		return err
+		return nil, err
 	}
 	if err := Prepare(destination); err != nil {
-		return err
+		return nil, err
 	}
 	sourceModel, err := Inspect(source, repo)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if sourceModel == nil {
-		return fmt.Errorf("%s is not in %s", repo, source.Name)
+		return nil, fmt.Errorf("%s is not in %s", repo, source.Name)
 	}
 	var destinationIdentity string
 	if err := helper(destination, "identity", destination.ModelDir(repo), nil, &destinationIdentity); err != nil {
-		return err
+		return nil, err
 	}
 	destinationModel, err := Inspect(destination, repo)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if sourceModel.Identity == destinationIdentity && (destinationModel == nil || !destinationModel.Reference) {
-		return fmt.Errorf("source and destination refer to the same physical repository")
+		return nil, fmt.Errorf("source and destination refer to the same physical repository")
 	}
 	meta, err := EnsureManifest(source, repo)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if destinationModel != nil && !destinationModel.Reference {
 		if err := Verify(destination, repo); err != nil {
 			expected, metaErr := ReadMeta(destination, repo)
 			if metaErr != nil || expected != nil {
-				return err
+				return nil, err
 			}
 		}
 		actual, err := Manifest(destination, repo)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if actual.Digest != meta.Digest {
-			return fmt.Errorf("conflicting artifact in %s; destination was not overwritten", destination.Name)
+			return nil, fmt.Errorf("conflicting artifact in %s; destination was not overwritten", destination.Name)
 		}
 		if err := helper(destination, "save", destination.ModelDir(repo), meta, nil); err != nil {
-			return err
+			return nil, err
 		}
+		result.Action = "already present"
+		result.SizeBytes = sourceModel.SizeBytes
+		return result, nil
+	}
+	total, free, err := Space(destination)
+	if err != nil {
+		return nil, err
+	}
+	if err := RoomOK(total, free, sourceModel.SizeBytes, force); err != nil {
+		return nil, err
+	}
+	stageRoot := filepath.Join(destination.Path, ".locks", "ark-staging")
+	runner := Vault{Name: "this machine"}
+	if source.Remote() && destination.Remote() {
+		runner = source
+	}
+	if err := rsyncGNU(runner); err != nil {
+		return nil, err
+	}
+	stageVault := destination
+	stageVault.Path = stageRoot
+	if err := helper(destination, "mkdir", stageVault.ModelDir(repo), nil, nil); err != nil {
+		return nil, err
+	}
+	args := []string{"-a", "-s", "--checksum", "--partial", "--delete", "--copy-unsafe-links", "--exclude=.arkmeta.json", "--exclude=*.incomplete", "--exclude=*.lock", "--exclude=*.tmp", "--exclude=.locks", "--", source.ModelDir(repo) + "/", stageVault.ModelDir(repo) + "/"}
+	if source.Remote() && destination.Remote() {
+		args[len(args)-1] = destination.Host + ":" + stageVault.ModelDir(repo) + "/"
+		args = append([]string{"-e", "ssh -o BatchMode=yes -o ConnectTimeout=10"}, args...)
+		_, err = Run(source, true, "rsync", args...)
 	} else {
-		total, free, err := Space(destination)
-		if err != nil {
-			return err
+		if source.Remote() {
+			args[len(args)-2] = source.Host + ":" + source.ModelDir(repo) + "/"
 		}
-		if err := RoomOK(total, free, sourceModel.SizeBytes, force); err != nil {
-			return err
-		}
-		stageRoot := filepath.Join(destination.Path, ".locks", "ark-staging")
-		runner := Vault{Name: "this machine"}
-		if source.Remote() && destination.Remote() {
-			runner = source
-		}
-		if err := rsyncGNU(runner); err != nil {
-			return err
-		}
-		stageVault := destination
-		stageVault.Path = stageRoot
-		if err := helper(destination, "mkdir", stageVault.ModelDir(repo), nil, nil); err != nil {
-			return err
-		}
-		args := []string{"-a", "-s", "--checksum", "--partial", "--delete", "--copy-unsafe-links", "--exclude=.arkmeta.json", "--exclude=*.incomplete", "--exclude=*.lock", "--exclude=*.tmp", "--exclude=.locks", "--", source.ModelDir(repo) + "/", stageVault.ModelDir(repo) + "/"}
-		if source.Remote() && destination.Remote() {
+		if destination.Remote() {
 			args[len(args)-1] = destination.Host + ":" + stageVault.ModelDir(repo) + "/"
-			args = append([]string{"-e", "ssh -o BatchMode=yes -o ConnectTimeout=10"}, args...)
-			_, err = Run(source, true, "rsync", args...)
-		} else {
-			if source.Remote() {
-				args[len(args)-2] = source.Host + ":" + source.ModelDir(repo) + "/"
-			}
-			if destination.Remote() {
-				args[len(args)-1] = destination.Host + ":" + stageVault.ModelDir(repo) + "/"
-			}
-			args = append([]string{"-e", "ssh -o BatchMode=yes -o ConnectTimeout=10"}, args...)
-			_, err = Run(runner, true, "rsync", args...)
 		}
-		if err != nil {
-			return err
-		}
-		actual, err := Manifest(stageVault, repo)
-		if err != nil {
-			return err
-		}
-		if actual.Digest != meta.Digest {
-			return fmt.Errorf("destination verification failed; staging retained and source untouched")
-		}
-		if err := helper(stageVault, "save", stageVault.ModelDir(repo), meta, nil); err != nil {
-			return err
-		}
-		publication := map[string]string{"staging": stageVault.ModelDir(repo)}
-		if destinationModel != nil && destinationModel.Reference {
-			publication["reference_identity"] = destinationIdentity
-		}
-		if err := helper(destination, "publish", destination.ModelDir(repo), publication, nil); err != nil {
-			return err
-		}
+		args = append([]string{"-e", "ssh -o BatchMode=yes -o ConnectTimeout=10"}, args...)
+		_, err = Run(runner, true, "rsync", args...)
+	}
+	if err != nil {
+		return nil, err
+	}
+	actual, err := Manifest(stageVault, repo)
+	if err != nil {
+		return nil, err
+	}
+	if actual.Digest != meta.Digest {
+		return nil, fmt.Errorf("destination verification failed; staging retained and source untouched")
+	}
+	if err := helper(stageVault, "save", stageVault.ModelDir(repo), meta, nil); err != nil {
+		return nil, err
+	}
+	publication := map[string]string{"staging": stageVault.ModelDir(repo)}
+	if destinationModel != nil && destinationModel.Reference {
+		publication["reference_identity"] = destinationIdentity
+	}
+	if err := helper(destination, "publish", destination.ModelDir(repo), publication, nil); err != nil {
+		return nil, err
 	}
 	if move {
 		if err := Verify(destination, repo); err != nil {
-			return err
+			return nil, err
 		}
-		return Delete(source, repo, meta)
+		if err := Delete(source, repo, meta); err != nil {
+			return nil, err
+		}
+		result.Action = "moved"
+	} else {
+		result.Action = "copied"
 	}
-	return nil
+	result.SizeBytes = sourceModel.SizeBytes
+	return result, nil
 }
 
 func Delete(vault Vault, repo string, expected *Meta) error {

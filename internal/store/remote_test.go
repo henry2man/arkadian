@@ -31,18 +31,18 @@ func TestRemoteTransfersAndPhysicalAliases(test *testing.T) {
 	mockSSH(test)
 	source := fixture(test, filepath.Join(test.TempDir(), "source with 'quotes'"))
 	remote := Vault{Name: "remote", Type: "huggingface", Host: "remote-host", Path: filepath.Join(test.TempDir(), "remote with spaces")}
-	if err := Transfer("org/model", source, remote, false, true); err != nil {
+	if _, err := Transfer("org/model", source, remote, false, true); err != nil {
 		test.Fatal(err)
 	}
 	if models, _, err := Scan(remote); err != nil || len(models) != 1 {
 		test.Fatalf("remote scan: %+v %v", models, err)
 	}
 	second := Vault{Name: "second", Type: "huggingface", Host: "second-host", Path: filepath.Join(test.TempDir(), "second")}
-	if err := Transfer("org/model", remote, second, false, true); err != nil {
+	if _, err := Transfer("org/model", remote, second, false, true); err != nil {
 		test.Fatal(err)
 	}
 	local := Vault{Name: "local", Type: "huggingface", Path: filepath.Join(test.TempDir(), "local")}
-	if err := Transfer("org/model", second, local, true, true); err != nil {
+	if _, err := Transfer("org/model", second, local, true, true); err != nil {
 		test.Fatal(err)
 	}
 	if err := Verify(local, "org/model"); err != nil {
@@ -50,7 +50,7 @@ func TestRemoteTransfersAndPhysicalAliases(test *testing.T) {
 	}
 	alias := remote
 	alias.Host = "another-alias"
-	if err := Transfer("org/model", remote, alias, true, true); err == nil {
+	if _, err := Transfer("org/model", remote, alias, true, true); err == nil {
 		test.Fatal("same physical remote model accepted under two host aliases")
 	}
 	if _, err := os.Stat(remote.ModelDir("org/model")); err != nil {

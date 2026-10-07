@@ -39,7 +39,7 @@ func TestNativeCacheTransfer(t *testing.T) {
 	if models, _, err := Scan(source); err != nil || len(models) != 1 {
 		t.Fatalf("scan: %+v %v", models, err)
 	}
-	if err := Transfer("org/model", source, destination, false, true); err != nil {
+	if _, err := Transfer("org/model", source, destination, false, true); err != nil {
 		t.Fatal(err)
 	}
 	sourceInfo, _ := os.Stat(filepath.Join(source.ModelDir("org/model"), "blobs/weights"))
@@ -53,7 +53,7 @@ func TestNativeCacheTransfer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(destination.ModelDir("org/model"), "blobs/weights"), []byte("corrupt"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := Transfer("org/model", source, destination, true, true); err == nil {
+	if _, err := Transfer("org/model", source, destination, true, true); err == nil {
 		t.Fatal("move accepted a corrupt destination")
 	}
 	if _, err := os.Stat(source.ModelDir("org/model")); err != nil {
@@ -95,7 +95,7 @@ func TestSharedBlobStoreLinksTransfer(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination := Vault{Name: "destination", Type: "huggingface", Path: filepath.Join(t.TempDir(), "destination")}
-	if err := Transfer("org/model", source, destination, false, true); err != nil {
+	if _, err := Transfer("org/model", source, destination, false, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := Verify(destination, "org/model"); err != nil {

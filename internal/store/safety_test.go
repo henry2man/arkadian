@@ -87,7 +87,7 @@ func TestTransferResumesAndSourceChangeProtectsData(test *testing.T) {
 		test.Fatal(err)
 	}
 	test.Setenv("PATH", commands+string(os.PathListSeparator)+originalPath)
-	if err := Transfer("org/model", source, destination, false, true); err == nil {
+	if _, err := Transfer("org/model", source, destination, false, true); err == nil {
 		test.Fatal("interruption accepted")
 	}
 	stage := filepath.Join(destination.Path, ".locks", "ark-staging", "models--org--model")
@@ -95,7 +95,7 @@ func TestTransferResumesAndSourceChangeProtectsData(test *testing.T) {
 		test.Fatal("staging not retained", err)
 	}
 	test.Setenv("PATH", originalPath)
-	if err := Transfer("org/model", source, destination, false, true); err != nil {
+	if _, err := Transfer("org/model", source, destination, false, true); err != nil {
 		test.Fatal(err)
 	}
 	if err := Verify(destination, "org/model"); err != nil {
@@ -107,7 +107,7 @@ func TestTransferResumesAndSourceChangeProtectsData(test *testing.T) {
 		test.Fatal(err)
 	}
 	test.Setenv("PATH", commands+string(os.PathListSeparator)+originalPath)
-	if err := Transfer("org/model", source, second, true, true); err == nil {
+	if _, err := Transfer("org/model", source, second, true, true); err == nil {
 		test.Fatal("changed source was deleted")
 	}
 	if _, err := os.Stat(source.ModelDir("org/model")); err != nil {
@@ -139,7 +139,7 @@ func TestTransferRejectsOpenrsync(test *testing.T) {
 		test.Fatal(err)
 	}
 	test.Setenv("PATH", commands+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := Transfer("org/model", source, destination, false, true); err == nil || !strings.Contains(err.Error(), "brew install rsync") {
+	if _, err := Transfer("org/model", source, destination, false, true); err == nil || !strings.Contains(err.Error(), "brew install rsync") {
 		test.Fatalf("openrsync accepted: %v", err)
 	}
 }

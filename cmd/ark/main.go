@@ -357,12 +357,12 @@ func (application *app) run(command string, args []string, flags map[string]stri
 				return application.refresh(sourceName)
 			}
 		}
-		err = store.Transfer(args[0], sourceVault, destinationVault, move, flags["force"] != "")
-		refreshErr := application.refresh(sourceName, destinationName)
+		result, err := store.Transfer(args[0], sourceVault, destinationVault, move, flags["force"] != "")
 		if err != nil {
 			return err
 		}
-		return refreshErr
+		fmt.Fprintf(application.diagnostics, "%s %s: %s (%s)\n", result.Action, result.Repo, result.Destination, humanBytes(result.SizeBytes))
+		return application.refresh(sourceName, destinationName)
 	case "rm":
 		return application.remove(args[0], args[1], flags)
 	}
@@ -456,10 +456,12 @@ func (application *app) get(repo string, flags map[string]string) error {
 	}
 	var failures []error
 	for _, vault := range candidates {
-		if err := store.Transfer(repo, vault, destination, false, flags["force"] != ""); err != nil {
+		result, err := store.Transfer(repo, vault, destination, false, flags["force"] != "")
+		if err != nil {
 			failures = append(failures, err)
 			continue
 		}
+		fmt.Fprintf(application.diagnostics, "%s %s: %s (%s)\n", result.Action, result.Repo, result.Destination, humanBytes(result.SizeBytes))
 		return application.refresh(vault.Name, destination.Name)
 	}
 	return errors.Join(failures...)
@@ -530,9 +532,12 @@ func (application *app) sync(sourceName, destinationName string, flags map[strin
 	}
 	var failures []error
 	for _, model := range models {
-		if err := store.Transfer(model.Repo, sourceVault, destinationVault, false, flags["force"] != ""); err != nil {
-			fmt.Fprintln(application.diagnostics, err)
+		result, err := store.Transfer(model.Repo, sourceVault, destinationVault, false, flags["force"] != "")
+		if err != nil {
+			fmt.Fprintf(application.diagnostics, "%s %s: %s\n", model.Repo, destinationName, err)
 			failures = append(failures, err)
+		} else {
+			fmt.Fprintf(application.diagnostics, "%s %s: %s (%s)\n", result.Action, model.Repo, destinationName, humanBytes(result.SizeBytes))
 		}
 	}
 	if err := application.refresh(sourceName, destinationName); err != nil {
