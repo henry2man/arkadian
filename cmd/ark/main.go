@@ -878,7 +878,13 @@ func cmdDownload(args []string) {
 		die("%v", err)
 	}
 	slug := store.Slug(repo)
-	tmpDir := filepath.Join(filepath.Dir(vault.Path), "staging", slug)
+	// stage next to the vault: the move into it is then a rename, not a copy
+	dir := filepath.Dir(vault.Path)
+	staging := filepath.Join(dir, "staging")
+	if dir == "." {
+		staging = filepath.Join(os.TempDir(), "ark-staging") // never the folder you ran from
+	}
+	tmpDir := filepath.Join(staging, slug)
 	os.RemoveAll(tmpDir)
 	defer os.RemoveAll(tmpDir)
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
