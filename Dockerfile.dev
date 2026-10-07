@@ -1,0 +1,17 @@
+# Test environment. Ubuntu 24.04 matches Spark OS and gives GNU rsync 3.2.7.
+# Build per platform: docker build --platform linux/arm64 -f Dockerfile.dev -t ark-dev-arm .
+FROM ubuntu:24.04
+
+ARG GO_VERSION=1.27.1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+         ca-certificates curl git openssh-client python3 python3-pip rsync \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip install --break-system-packages 'huggingface_hub[cli]==1.5.0' \
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" | tar -C /usr/local -xz
+
+ENV PATH=/usr/local/go/bin:/usr/local/bin:$PATH
+ENV HF_HUB_OFFLINE=1
+WORKDIR /src
+CMD ["scripts/test.sh"]

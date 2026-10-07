@@ -9,35 +9,50 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-arm64
+            os: ubuntu-latest
+            platform: linux/arm64
+          - name: linux-amd64
+            os: ubuntu-latest
+            platform: linux/amd64
+          - name: darwin-arm64
+            os: macos-latest
+            platform: ''
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    env:
+      HF_HUB_OFFLINE: '1'
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+      # ponytail: QEMU on an amd64 runner, works while the repository is private.
+      # Upgrade path: runs-on ubuntu-2404-arm for native arm64 when the repository is public.
+      - name: Enable cross-architecture containers
+        if: matrix.platform != '' && matrix.platform != 'linux/amd64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Container tests
+        if: matrix.platform != ''
+        run: |
+          docker build --platform ${{ matrix.platform }} -f Dockerfile.dev -t ark-dev .
+          docker run --rm --platform ${{ matrix.platform }} -v "$PWD":/src ark-dev
 
       - uses: actions/setup-python@v5
+        if: matrix.platform == ''
         with:
           python-version: '3.12'
 
-      - name: Runtime tools
-        run: python -m pip install 'huggingface_hub==1.5.0'
-
-      - name: gofmt
+      - name: macOS tools
+        if: matrix.platform == ''
         run: |
-          bad=$(gofmt -l .)
-          test -z "$bad" || { echo "$bad"; echo "fix with: gofmt -w ."; exit 1; }
+          brew install go rsync
+          python -m pip install 'huggingface_hub[cli]==1.5.0'
 
-      - name: vet
-        run: go vet ./...
-
-      - name: test
-        run: go test ./...
-
-      - name: build
-        run: go build -o bin/ark ./cmd/ark
-
-      - name: smoke
-        run: ./bin/ark version
+      - name: macOS tests
+        if: matrix.platform == ''
+        run: scripts/test.sh

@@ -15,15 +15,22 @@ Website follows validation. Homebrew release is the final V1 phase.
 ## Tools and checks
 
 Use Go 1.27.1 or later. Install with Homebrew when needed. Runtime tests require
-HF CLI (tested with 1.5.0), Python 3.9+, rsync, and ssh. No external Go modules.
+HF CLI (tested with 1.5.0), Python 3.9+, GNU rsync 3 or later, and ssh. macOS
+ships openrsync, so run `brew install rsync`. No external Go modules.
+
+Supported and tested platforms: linux/arm64 (Spark target), linux/amd64, and
+darwin/arm64. Run one script everywhere.
 
 ```bash
-gofmt -w cmd internal
-go vet ./...
-go test ./...
-go build -o bin/ark ./cmd/ark
-./bin/ark version
+scripts/test.sh                                            # this machine
+docker build --platform linux/arm64 -f Dockerfile.dev -t ark-dev-arm .
+docker build --platform linux/amd64 -f Dockerfile.dev -t ark-dev-amd .
+docker run --rm -v "$PWD":/src ark-dev-arm                 # native on Apple silicon
+docker run --rm -v "$PWD":/src ark-dev-amd                 # Rosetta or QEMU
 ```
+
+The container uses Ubuntu 24.04, the Spark OS base, so GNU rsync behaviour is the
+same on every platform. Keep `gofmt -w cmd internal` before the script.
 
 Use RED/GREEN for behavior changes. Leave a small runnable test for nontrivial
 logic. Before finishing, run format, vet, tests, build, and a real local-cache
@@ -45,6 +52,7 @@ command. Report actual checks and skipped hardware checks separately.
 3. Keep native HF layout. Never silently migrate an old Arkadian directory.
 4. Every vault has an explicit huggingface type. Reject unsupported providers.
 5. Run external tools through store.Run and store.Command. Quote remote argv.
+   Pass rsync -s and require GNU rsync 3+ instead of quoting its paths.
    SSH uses BatchMode. Do not ask for passwords or configure the operating system.
 6. Publish transfers only after verification. Recheck source before deletion.
 7. Do not count references as independent copies. Never delete a link target.

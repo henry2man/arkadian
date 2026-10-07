@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -126,5 +127,19 @@ func TestRoomGuard(test *testing.T) {
 	}
 	if err := RoomOK(1000, 200, 101, true); err != nil {
 		test.Fatal(err)
+	}
+}
+
+func TestTransferRejectsOpenrsync(test *testing.T) {
+	source := fixture(test, filepath.Join(test.TempDir(), "source"))
+	destination := Vault{Name: "destination", Type: "huggingface", Path: filepath.Join(test.TempDir(), "destination")}
+	commands := test.TempDir()
+	script := "#!/bin/sh\nprintf 'openrsync: protocol version 29\\nrsync version 2.6.9 compatible\\n'\n"
+	if err := os.WriteFile(filepath.Join(commands, "rsync"), []byte(script), 0o755); err != nil {
+		test.Fatal(err)
+	}
+	test.Setenv("PATH", commands+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := Transfer("org/model", source, destination, false, true); err == nil || !strings.Contains(err.Error(), "brew install rsync") {
+		test.Fatalf("openrsync accepted: %v", err)
 	}
 }

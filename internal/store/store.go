@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -101,6 +102,23 @@ func (vault Vault) Validate() error {
 }
 
 func Quote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
+
+var rsyncVersion = regexp.MustCompile(`version (\d+)\.`)
+
+// rsyncGNU requires GNU rsync 3 or later. Transfers pass -s so paths with spaces and
+// quotes survive the remote shell. openrsync, the macOS default, lacks -s.
+func rsyncGNU(vault Vault) error {
+	out, err := Run(vault, false, "rsync", "--version")
+	if err != nil {
+		return nil // the transfer reports a missing or broken rsync with its own error
+	}
+	if match := rsyncVersion.FindStringSubmatch(string(out)); match != nil && !strings.Contains(string(out), "openrsync") {
+		if major, err := strconv.Atoi(match[1]); err == nil && major >= 3 {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s needs GNU rsync 3 or later; on macOS run: brew install rsync", vault.Name)
+}
 
 func Command(vault Vault, name string, args ...string) *exec.Cmd {
 	if !vault.Remote() {
@@ -462,25 +480,32 @@ func Transfer(repo string, source, destination Vault, move, force bool) error {
 			return err
 		}
 		stageRoot := filepath.Join(destination.Path, ".locks", "ark-staging")
+		runner := Vault{Name: "this machine"}
+		if source.Remote() && destination.Remote() {
+			runner = source
+		}
+		if err := rsyncGNU(runner); err != nil {
+			return err
+		}
 		stageVault := destination
 		stageVault.Path = stageRoot
 		if err := helper(destination, "mkdir", stageVault.ModelDir(repo), nil, nil); err != nil {
 			return err
 		}
-		args := []string{"-a", "--checksum", "--partial", "--delete", "--exclude=.arkmeta.json", "--exclude=*.incomplete", "--exclude=*.lock", "--exclude=*.tmp", "--exclude=.locks", "--", source.ModelDir(repo) + "/", stageVault.ModelDir(repo) + "/"}
+		args := []string{"-a", "-s", "--checksum", "--partial", "--delete", "--exclude=.arkmeta.json", "--exclude=*.incomplete", "--exclude=*.lock", "--exclude=*.tmp", "--exclude=.locks", "--", source.ModelDir(repo) + "/", stageVault.ModelDir(repo) + "/"}
 		if source.Remote() && destination.Remote() {
-			args[len(args)-1] = destination.Host + ":" + Quote(stageVault.ModelDir(repo)+"/")
+			args[len(args)-1] = destination.Host + ":" + stageVault.ModelDir(repo) + "/"
 			args = append([]string{"-e", "ssh -o BatchMode=yes -o ConnectTimeout=10"}, args...)
 			_, err = Run(source, true, "rsync", args...)
 		} else {
 			if source.Remote() {
-				args[len(args)-2] = source.Host + ":" + Quote(source.ModelDir(repo)+"/")
+				args[len(args)-2] = source.Host + ":" + source.ModelDir(repo) + "/"
 			}
 			if destination.Remote() {
-				args[len(args)-1] = destination.Host + ":" + Quote(stageVault.ModelDir(repo)+"/")
+				args[len(args)-1] = destination.Host + ":" + stageVault.ModelDir(repo) + "/"
 			}
 			args = append([]string{"-e", "ssh -o BatchMode=yes -o ConnectTimeout=10"}, args...)
-			_, err = Run(Vault{Name: "this machine"}, true, "rsync", args...)
+			_, err = Run(runner, true, "rsync", args...)
 		}
 		if err != nil {
 			return err
