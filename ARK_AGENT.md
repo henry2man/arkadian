@@ -13,16 +13,18 @@ Arkadian manages Hugging Face model copies in named vaults. A vault has type
 `huggingface` and points to a native Hugging Face cache. The default working
 vault is usually `hfcache`.
 
-Check the current inventory first:
+On a machine Arkadian has not scanned before, build the inventory first:
 
 ```sh
+ark refresh
 ark list
 ark vault ls
 ```
 
-Use the exact Hugging Face repository ID shown by Arkadian. Do not treat a short
-name as an alias. Use `ark refresh` when a mounted vault or external tool may
-have changed the files.
+An empty list can mean the cache was never scanned. It does not prove you have no
+models. Run `ark refresh` once per machine, and again when a mount or an external
+tool may have changed the files. Use the exact Hugging Face repository ID shown by
+Arkadian. Do not treat a short name as an alias.
 
 ## Common Tasks
 

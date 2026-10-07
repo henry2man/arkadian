@@ -246,14 +246,16 @@ func Verify(vault Vault, repo string) error {
 	return nil
 }
 
-func Scan(vault Vault) ([]*Model, error) {
+// Scan reports the models HF reports. It returns entries HF ignores, such as an
+// interrupted download that left only refs/, instead of failing the whole vault.
+func Scan(vault Vault) ([]*Model, []string, error) {
 	var names []string
 	if err := helper(vault, "catalog", vault.Path, nil, &names); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	data, err := Run(vault, false, "hf", "cache", "ls", "--revisions", "--format", "json", "--cache-dir", vault.Path)
 	if err != nil {
-		return nil, fmt.Errorf("%w; HF CLI must support cache ls --revisions --format json", err)
+		return nil, nil, fmt.Errorf("%w; HF CLI must support cache ls --revisions --format json", err)
 	}
 	var entries []struct {
 		Repo     string `json:"repo_id"`
@@ -261,7 +263,7 @@ func Scan(vault Vault) ([]*Model, error) {
 		Revision string `json:"revision"`
 	}
 	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, fmt.Errorf("invalid HF cache JSON: %w", err)
+		return nil, nil, fmt.Errorf("invalid HF cache JSON: %w", err)
 	}
 	observed := map[string]map[string]bool{}
 	for _, entry := range entries {
@@ -273,21 +275,33 @@ func Scan(vault Vault) ([]*Model, error) {
 		}
 		observed[entry.Repo][entry.Revision] = true
 	}
-	models := []*Model{}
+	repos, skipped := []string{}, []string{}
+	for repo := range observed {
+		repos = append(repos, repo)
+	}
+	slices.Sort(repos)
 	for _, name := range names {
-		repo := strings.ReplaceAll(strings.TrimPrefix(name, "models--"), "--", "/")
+		if repo := strings.ReplaceAll(strings.TrimPrefix(name, "models--"), "--", "/"); observed[repo] == nil {
+			skipped = append(skipped, repo)
+		}
+	}
+	models := []*Model{}
+	for _, repo := range repos {
 		model, err := Inspect(vault, repo)
 		if err != nil {
-			return nil, fmt.Errorf("incomplete scan; %s: %w", repo, err)
+			skipped = append(skipped, repo)
+			continue
 		}
 		for _, revision := range model.Revisions {
 			if !observed[repo][revision.Revision] {
-				return nil, fmt.Errorf("HF omitted %s@%s; cache may be corrupt; no copies were marked missing", repo, revision.Revision)
+				skipped = append(skipped, repo)
+				break
 			}
 		}
 		models = append(models, model)
 	}
-	return models, nil
+	slices.Sort(skipped)
+	return models, skipped, nil
 }
 
 func Snapshot(model *Model, revision string) (string, error) {
@@ -323,6 +337,7 @@ type Location struct {
 type VaultState struct {
 	State      string    `json:"state"`
 	Error      string    `json:"error,omitempty"`
+	Skipped    []string  `json:"skipped,omitempty"`
 	ObservedAt time.Time `json:"observed_at"`
 }
 
@@ -366,7 +381,7 @@ func ReadInventory(path string) (*Inventory, bool, error) {
 }
 
 func (inventory *Inventory) Refresh(vault Vault) error {
-	models, err := Scan(vault)
+	models, skipped, err := Scan(vault)
 	if err != nil {
 		inventory.Vaults[vault.Name] = &VaultState{State: "unknown", Error: err.Error()}
 		for _, copies := range inventory.Models {
@@ -399,7 +414,7 @@ func (inventory *Inventory) Refresh(vault Vault) error {
 		}
 		inventory.Models[model.Repo][vault.Name] = location
 	}
-	inventory.Vaults[vault.Name] = &VaultState{State: "available", ObservedAt: now}
+	inventory.Vaults[vault.Name] = &VaultState{State: "available", Skipped: skipped, ObservedAt: now}
 	return nil
 }
 

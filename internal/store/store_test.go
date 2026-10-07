@@ -36,7 +36,7 @@ func TestNativeCacheTransfer(t *testing.T) {
 	if err != nil || len(model.Revisions) != 2 {
 		t.Fatalf("inspect: %+v %v", model, err)
 	}
-	if models, err := Scan(source); err != nil || len(models) != 1 {
+	if models, _, err := Scan(source); err != nil || len(models) != 1 {
 		t.Fatalf("scan: %+v %v", models, err)
 	}
 	if err := Transfer("org/model", source, destination, false, true); err != nil {
@@ -110,5 +110,30 @@ func TestSharedBlobStoreLinksTransfer(t *testing.T) {
 	}
 	if _, err = os.Stat(filepath.Join(destination.ModelDir("org/model"), "snapshots", strings.Repeat("a", 40), "weights.bin")); err != nil {
 		t.Fatal("intra-repository link lost", err)
+	}
+}
+
+func TestScanIgnoresEntriesWithoutSnapshot(t *testing.T) {
+	source := fixture(t, filepath.Join(t.TempDir(), "cache"))
+	refs := filepath.Join(source.Path, "models--x--y", "refs")
+	if err := os.MkdirAll(refs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(refs, "main"), []byte(strings.Repeat("a", 40)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	models, skipped, err := Scan(source)
+	if err != nil || len(models) != 1 {
+		t.Fatalf("one interrupted download failed the vault: %d %v", len(models), err)
+	}
+	if len(skipped) != 1 || skipped[0] != "x/y" {
+		t.Fatalf("skipped: %v", skipped)
+	}
+	inventory := &Inventory{Models: map[string]map[string]*Location{}, Vaults: map[string]*VaultState{}}
+	if err := inventory.Refresh(source); err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Vaults["cache"].Skipped) != 1 {
+		t.Fatalf("skipped entries not recorded: %+v", inventory.Vaults["cache"])
 	}
 }

@@ -100,10 +100,17 @@ verification. Distinguish present, verified, corrupt, missing, and unknown.
 ### Refresh and list
 
 Use `hf cache ls --revisions --format json --cache-dir ...`, locally or over SSH.
+HF decides which repositories are cached models. Arkadian does not walk the cache
+directory to find models. An entry HF ignores, such as an interrupted download with
+only `refs/`, is reported as skipped and does not fail the vault. Report skipped
+entries once in the refresh output and store them in the vault state.
 Refresh transfers no weights and does not perform full hash verification.
 Keep unreachable vault entries as unknown. Mark missing only after a complete,
 successful scan. Invalidate verification when observed content changes.
 Successful Arkadian operations also update the affected inventory entries.
+
+List reads the inventory. When a selected vault was never scanned or is unknown,
+list prints the reason on stderr and exits 1. It still prints the models it knows.
 
 List uses rows for model/revision, size, and columns for vaults. Include a state
 legend and disk space when available. Keep risk hints for no other copy and for
@@ -177,6 +184,10 @@ set.
 
 Kept simple on purpose: one CI job, no container, no macOS runner, and one lock per
 config file. Add a platform job when a real platform breaks.
+
+Versioning: tags carry the version, `v0.MINOR.PATCH`. Use a patch for fixes and a
+minor for features or behavior changes. GoReleaser injects the tag with
+`-X main.version={{.Version}}`. The first tag is v0.5.0.
 
 Remaining: hardware validation on Spark, USB, and NAS with one large model and a live
 runtime (last Phase 4 item). Then the website (Phase 5) and the release with Homebrew

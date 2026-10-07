@@ -250,8 +250,11 @@ func (application *app) refresh(names ...string) error {
 	for _, name := range names {
 		vault := application.configuration.Vaults[name]
 		if err := application.inventory.Refresh(vault); err != nil {
-			fmt.Fprintln(application.diagnostics, err)
 			failures = append(failures, err)
+			continue
+		}
+		if state := application.inventory.Vaults[name]; state != nil && len(state.Skipped) > 0 {
+			fmt.Fprintf(application.diagnostics, "%s: ignored %d entry without a snapshot; resume it with hf download\n", name, len(state.Skipped))
 		}
 	}
 	if err := application.save(); err != nil {
@@ -274,9 +277,7 @@ func (application *app) run(command string, args []string, flags map[string]stri
 					return err
 				}
 			}
-			if err := application.refresh(application.names()...); err != nil {
-				fmt.Fprintln(application.diagnostics, "partial inventory; unavailable vaults remain unknown")
-			}
+			application.refresh(application.names()...)
 		}
 		return application.list(args, flags)
 	}
@@ -519,7 +520,7 @@ func (application *app) sync(sourceName, destinationName string, flags map[strin
 	if sourceName == destinationName {
 		return fmt.Errorf("source and destination must differ")
 	}
-	models, err := store.Scan(sourceVault)
+	models, _, err := store.Scan(sourceVault)
 	if err != nil {
 		return err
 	}
@@ -550,7 +551,7 @@ func (application *app) verify(args []string, flags map[string]string) error {
 	checked := 0
 	for _, name := range names {
 		vault := application.configuration.Vaults[name]
-		models, err := store.Scan(vault)
+		models, _, err := store.Scan(vault)
 		if err != nil {
 			failures = append(failures, err)
 			continue
@@ -595,6 +596,18 @@ func (application *app) list(args []string, flags map[string]string) error {
 	names := application.names()
 	if flags["vault"] != "" {
 		names = []string{flags["vault"]}
+	}
+	unreadable := []string{}
+	for _, name := range names {
+		state := application.inventory.Vaults[name]
+		switch {
+		case state == nil || state.ObservedAt.IsZero():
+			fmt.Fprintf(application.diagnostics, "%s: never scanned; run: ark refresh\n", name)
+			unreadable = append(unreadable, name)
+		case state.State == "unknown":
+			fmt.Fprintf(application.diagnostics, "%s: unknown; %s\n", name, state.Error)
+			unreadable = append(unreadable, name)
+		}
 	}
 	filtered := &store.Inventory{Models: map[string]map[string]*store.Location{}, Vaults: map[string]*store.VaultState{}}
 	for _, name := range names {
@@ -693,6 +706,9 @@ func (application *app) list(args []string, flags map[string]string) error {
 		if !working {
 			fmt.Fprintf(application.output, "%s: not in %s; use ark get\n", repo, application.configuration.DefaultVault)
 		}
+	}
+	if len(unreadable) > 0 {
+		return fmt.Errorf("incomplete inventory; %s: run: ark refresh", strings.Join(unreadable, ", "))
 	}
 	return nil
 }

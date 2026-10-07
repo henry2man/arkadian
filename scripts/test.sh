@@ -13,5 +13,5 @@ rsync --version | grep -q 'version [3-9]\.' || {
 test -z "$(gofmt -l .)" || { echo "run: gofmt -w ." >&2; exit 1; }
 go vet ./...
 go test ./... -count=1
-go build -o bin/ark ./cmd/ark
+go build -ldflags "-X main.version=$(git describe --tags --always)" -o bin/ark ./cmd/ark
 bin/ark version

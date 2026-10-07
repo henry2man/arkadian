@@ -34,7 +34,7 @@ func TestRemoteTransfersAndPhysicalAliases(test *testing.T) {
 	if err := Transfer("org/model", source, remote, false, true); err != nil {
 		test.Fatal(err)
 	}
-	if models, err := Scan(remote); err != nil || len(models) != 1 {
+	if models, _, err := Scan(remote); err != nil || len(models) != 1 {
 		test.Fatalf("remote scan: %+v %v", models, err)
 	}
 	second := Vault{Name: "second", Type: "huggingface", Host: "second-host", Path: filepath.Join(test.TempDir(), "second")}
