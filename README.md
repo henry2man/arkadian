@@ -47,7 +47,8 @@ Hugging Face itself disappears.
   vault keeps the bytes. Both need a path the machine can open, so they work with
   local and mounted vaults, not with an ssh vault. A link is not a backup: the
   bytes live in one place. `ark unlink` removes a serving link.
-- **Manifests**: `--hashes` stores a sha256 manifest (`.arkmeta.json`); `ark verify`
+- **Manifests**: every download stores a sha256 manifest (`.arkmeta.json`), so
+  nothing in a vault is unverifiable. `ark verify`
   detects NAS bit-rot.
 
 ## Install
@@ -104,7 +105,8 @@ You can still point a `local`-kind vault at a mounted CIFS path if you prefer â€
 | Command | What it does |
 |---|---|
 | `ark list` | Size per model, size per vault, free disk space, and the copies that are at risk |
-| `ark download <repo> --to V [--rev R] [--source S] [--hashes]` | Fetch from HF or ModelScope into staging, then into the vault |
+| `ark download <repo> --to V [--rev R] [--source S]` | Fetch from HF or ModelScope into staging, then into the vault. The sha256 manifest is always stored |
+| `ark load <repo> --from V --link\|--copy [--force] [--yes]` | Make a model available here. `--link` = no bytes; `--copy` = real bytes, with a room check first |
 | `ark mv <repo> --from A --to B [--link] [--yes]` | The one move verb. Copies, then deletes the source. `--link` = a symlink in B, A keeps the bytes, no space used |
 | `ark rm <repo> [--vault V] [--yes]` | Delete a model to free space. Asks first, `--yes` skips it |
 | `ark path <repo> [--vault V]` | Path of one model, local or `host:path` â€” what vLLM needs |
@@ -120,12 +122,12 @@ You can still point a `local`-kind vault at a mounted CIFS path if you prefer â€
 | `ark vault rm <name> [--yes]` | Drop a vault from the config. Never deletes files |
 | `ark version` | Version, one-line about, and the repo link |
 
-Ten commands, no aliases, no second way to do the same thing.
+Eleven commands, no aliases, no second way to do the same thing.
 
 ### Conventions
 
 - Flags are long and spelled out: `--to nas`. No short flags, except `-h` and `-v`.
-- A flag with no value is a switch: `--hashes`, `--link`, `--yes`.
+- A flag with no value is a switch: `--link`, `--copy`, `--yes`, `--force`.
 - Destructive commands ask. `--yes` answers yes for scripts.
 - The vault is named, never guessed: a missing `--from` or `--to` stops and says
   `Run: ark vault ls`.
@@ -134,17 +136,17 @@ Ten commands, no aliases, no second way to do the same thing.
   `ark vault add` and in `--from` / `--to`. `smb://` and `nfs://` are refused:
   ark reads a mounted path, it does not speak those protocols.
 - A removed command prints the one that replaces it. `ark promote` says to run
-  `ark mv`. Nothing fails with a shrug.
+  `ark load`. Nothing fails with a shrug.
 
 ### Example flow
 
 ```bash
 ark vault add spark ~/ark/spark                         # fast disk, where you work
 ark vault add nas   user@nas:/volume1/ark               # the cold copy, over ssh
-ark download Qwen/Qwen3-8B --hashes --to spark          # HF -> local vault
+ark download Qwen/Qwen3-8B --to spark                   # HF -> local vault
 ark mv Qwen/Qwen3-8B --from spark --to nas              # cold copy on the NAS, free the disk
 ark list                                                # sizes per vault + free space
-ark mv Qwen/Qwen3-8B --from nas --to spark --link       # load it back without the bytes
+ark load Qwen/Qwen3-8B --from nas --link                # use it here, copy nothing
 ark link Qwen/Qwen3-8B                                  # symlink + the export lines
 export HF_HUB_OFFLINE=1
 vllm serve $(ark path Qwen/Qwen3-8B) ...                 # fully offline

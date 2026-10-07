@@ -61,6 +61,8 @@ func main() {
 		cmdList(rest)
 	case "download":
 		cmdDownload(rest)
+	case "load":
+		cmdLoad(rest)
 	case "mv", "move":
 		cmdMv(rest)
 	case "rm", "remove":
@@ -93,9 +95,9 @@ func main() {
 // removed maps old command names to what replaces them. Muscle memory gets a
 // pointer, not a shrug.
 var removed = map[string]string{
-	"promote": "ark mv <repo> --from <vault> --to <local>",
+	"promote": "ark load <repo> --from <vault> --link   (or --copy)",
 	"demote":  "ark mv <repo> --from <local> --to <vault>",
-	"pull":    "ark mv <repo> --from <vault> --to <local>",
+	"pull":    "ark load <repo> --from <vault> --link   (or --copy)",
 	"down":    "ark mv <repo> --from <local> --to <vault>",
 	"push":    "ark mv <repo> --from <local> --to <vault>",
 	"model":   "ark list, ark download, ark mv, ark rm, ark path",
@@ -126,6 +128,7 @@ Usage:
 Commands:
   list                     Size per model, per vault, and free disk space
   download <repo> --to V   Fetch from HF or ModelScope into vault V
+  load <repo> --from V     Make a model available here. --link or --copy
   mv <repo> --from A --to B
                            Move a model between vaults. --link moves no bytes
   rm <repo> [--vault V]    Delete a model. Asks before it deletes
@@ -176,8 +179,103 @@ func cmdMv(args []string) {
 		!confirm(fmt.Sprintf("move %s: %s -> %s", repo, src.Vault.Name, dst.Name)) {
 		die("cancelled")
 	}
+	if err := copyModel(slug, src, dst); err != nil {
+		die("move: %v", err)
+	}
+	// Drop the source only after a complete copy.
+	if err := removeModel(src.Vault, slug); err != nil {
+		die("copied, but the source is still there: %v", err)
+	}
+	fmt.Printf("ark: moved %s: %s -> %s\n", repo, src.Vault.Name, dst.Name)
+}
+
+// maxUse is the used-share ceiling of a vault. Past it a copy stops being a
+// favour and becomes a full disk. Raise it only with a reason: ark keeps the
+// number, not a config key.
+const maxUse = 0.90
+
+// roomOK refuses a copy that would push the vault past maxUse. A vault that
+// cannot answer with its size lets the copy through: a missing statfs is not a
+// reason to block work.
+func roomOK(v store.Vault, need int64, force bool) {
+	if force || need <= 0 {
+		return
+	}
+	total, free, err := store.Free(v.Path)
+	if err != nil || total <= 0 {
+		return
+	}
+	used := total - free
+	if used+need > int64(float64(total)*maxUse) {
+		die("%s is %d%% full: %s needs %s, and that passes the %d%% limit.\n"+
+			"  ark load <repo> --from <vault> --link   a link uses no space\n"+
+			"  ark rm <repo> --vault %s             free space first\n"+
+			"  --force                                 copy anyway",
+			v.Name, int(100*used/total), v.Name, humanBytes(need), int(maxUse*100), v.Name)
+	}
+}
+
+// cmdLoad makes a model available on this machine: the one action with a
+// direction in its name. The mode is explicit, because the two modes differ
+// by 60 GB: --link points here, --copy brings the bytes and checks room first.
+func cmdLoad(args []string) {
+	if wantsHelp(args) {
+		abortUsage(helpLoad)
+	}
+	pos, flags := parseFlags(args)
+	if len(pos) == 0 {
+		usageErr("usage: ark load <org/model> --from <vault> --link|--copy\nsee: ark load --help")
+	}
+	linkMode, copyMode := flags["link"] != "", flags["copy"] != ""
+	if linkMode == copyMode {
+		usageErr("say which mode: ark load %s --from <vault> --link (no bytes) or --copy (real bytes)", pos[0])
+	}
+	repo, slug := pos[0], store.Slug(pos[0])
+	src, err := resolveSourceRepo(flagOr(flags, "from", ""), repo)
+	if err != nil {
+		if flags["from"] == "" {
+			die("no --from vault. Run: ark vault ls\nknown vaults: %s\nhint: ark load %s --from <vault> --link",
+				strings.Join(sortedVaultNames(), ", "), repo)
+		}
+		die("%v\nhint: run: ark list", err)
+	}
+	dst, err := reachableVault(flags["to"])
+	if err != nil {
+		die("%v", err)
+	}
+	if src.Vault.Name == dst.Name {
+		fmt.Printf("ark: %s is already in vault %s\n", repo, dst.Name)
+		return
+	}
+	if linkMode {
+		// nothing is deleted and no bytes move, so no question is asked
+		mvAsLink(repo, slug, src.Vault, dst)
+		return
+	}
+	if !hasFlag(args, "yes", "force") &&
+		!confirm(fmt.Sprintf("copy %s to %s: %s -> %s", repo, dst.Name, src.Vault.Name, dst.Name)) {
+		die("cancelled")
+	}
+	roomOK(dst, modelBytes(src), hasFlag(args, "force"))
+	if err := copyModel(slug, src, dst); err != nil {
+		die("load: %v", err)
+	}
+	fmt.Printf("ark: loaded %s -> %s (copy; %s still holds its own)\n", repo, dst.Name, src.Vault.Name)
+}
+
+// modelBytes returns the size of a model, from its manifest or from disk.
+func modelBytes(m store.Model) int64 {
+	if m.Meta != nil && m.Meta.SizeBytes > 0 {
+		return m.Meta.SizeBytes
+	}
+	n, _, _ := store.DirSize(m.Dir)
+	return n
+}
+
+// copyModel puts the bytes in another vault and deletes nothing.
+func copyModel(slug string, src store.Model, dst store.Vault) error {
 	if err := config.EnsureRemote(dst, sshRun); err != nil {
-		die("prepare %s: %v (tip: enable SSH on the host, and ssh-copy-id %s)", dst.Name, err, dst.Host)
+		return fmt.Errorf("prepare %s: %w (tip: enable SSH on the host, and ssh-copy-id %s)", dst.Name, err, dst.Host)
 	}
 	srcPath, dstPath := src.Dir, dst.ModelDir(slug)
 	if src.Vault.Remote() {
@@ -188,18 +286,9 @@ func cmdMv(args []string) {
 	}
 	if src.Vault.Remote() || dst.Remote() {
 		// rsync streams remote to remote too, through this machine, no local disk
-		err = rsyncCopy(srcPath, dstPath, cfg.RsyncFlags)
-	} else {
-		err = store.CopyTree(srcPath, dstPath) // one disk: rsync would add nothing
+		return rsyncCopy(srcPath, dstPath, cfg.RsyncFlags)
 	}
-	if err != nil {
-		die("move: %v", err)
-	}
-	// Drop the source only after a complete copy.
-	if err := removeModel(src.Vault, slug); err != nil {
-		die("copied, but the source is still there: %v", err)
-	}
-	fmt.Printf("ark: moved %s: %s -> %s\n", repo, src.Vault.Name, dst.Name)
+	return store.CopyTree(srcPath, dstPath) // one disk: rsync would add nothing
 }
 
 // mvAsLink moves without bytes. The target vault holds a symlink and the source
@@ -401,7 +490,8 @@ Aliases: ark ls
 	helpDownload = `usage: ark download <org/model> [flags]
 
 Fetch a model into a vault. The download lands in staging, then moves into
-the vault. Nothing is written straight into the vault.
+the vault. Nothing is written straight into the vault. A sha256 manifest is
+always stored: a copy you cannot check is not a backup.
 
 A destination is required. Pass --to, or set default_to in the config.
 Sources cannot write over ssh, so the destination must be a local or samba
@@ -411,12 +501,32 @@ Flags:
   --to V            Destination vault. Required unless default_to is set.
   --rev R           Revision or tag. Default: main (master on ModelScope).
   --source S        hf, hf-transfer, obscura, or modelscope. Default: auto.
-  --hashes          Store a sha256 manifest. ark verify needs it.
 
 Examples:
-  ark download Qwen/Qwen3-8B --hashes --to spark
+  ark download Qwen/Qwen3-8B --to spark
   ark download Qwen/Qwen3-8B --to nas --rev v1.5
   ark download Qwen/Qwen3-8B --source modelscope --rev master
+`
+	helpLoad = `usage: ark load <org/model> --from <vault> <mode> [flags]
+
+Make a model available on this machine. The mode is required: the two modes
+differ by 60 GB.
+
+Modes:
+  --link     A link in the local vault that points at the source. No bytes, no
+             space used, the source must be a path this machine can open.
+  --copy     Real bytes in the local vault. ark checks room first: a copy that
+             would leave the vault more than 90% full stops. See --force.
+
+Flags:
+  --from V    Source vault. Required. Run ` + "`ark vault ls`" + ` for the names.
+  --to V      Local vault to write to. Default: the first local or mounted one.
+  --force     Copy even when the vault passes the 90% limit.
+  --yes       Skip the confirmation question. For scripts.
+
+Examples:
+  ark load Qwen/Qwen3-8B --from nas --link   # serve it, copy nothing
+  ark load Qwen/Qwen3-8B --from nas --copy   # bring 15 GB, room checked
 `
 	helpMv = `usage: ark mv <org/model> --from A --to B [flags]
 
@@ -585,7 +695,7 @@ func parseFlags(args []string) ([]string, map[string]string) {
 			i++
 			continue
 		}
-		flags[name] = "true" // bare switch: --hashes, --link, --yes
+		flags[name] = "true" // bare switch: --link, --copy, --yes, --force
 	}
 	return pos, flags
 }
@@ -833,7 +943,7 @@ func listRisk(rows []modelRow) {
 	if len(onlyCold) > 0 {
 		fmt.Printf("cold only (%d): not on local disk, slow or offline to serve\n", len(onlyCold))
 		for _, repo := range onlyCold {
-			fmt.Printf("  ark mv %s --from %s --to %s --link\n", repo, coldVaultHint(), firstLocalVault())
+			fmt.Printf("  ark load %s --from %s --link\n", repo, coldVaultHint())
 		}
 	}
 }
@@ -903,19 +1013,16 @@ func cmdDownload(args []string) {
 		Source:     eng.Name(),
 		Downloaded: time.Now().UTC(),
 	}
-	if flags["hashes"] != "" {
-		fmt.Println("ark: hashing files (manifest)...")
-		meta.Sha256 = map[string]string{}
-		for _, rel := range source.ListFiles(tmpDir) {
-			h, err := store.Sha256File(filepath.Join(tmpDir, rel))
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "ark: warn: hash %s: %v\n", rel, err)
-				continue
-			}
-			meta.Sha256[rel] = h
+	// The manifest is not optional: a copy you cannot check is not a backup.
+	fmt.Println("ark: hashing files (manifest)...")
+	meta.Sha256 = map[string]string{}
+	for _, rel := range source.ListFiles(tmpDir) {
+		h, err := store.Sha256File(filepath.Join(tmpDir, rel))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ark: warn: hash %s: %v\n", rel, err)
+			continue
 		}
-	} else {
-		fmt.Println("ark: pass --hashes to store a checksum manifest (slower, enables `ark verify`)")
+		meta.Sha256[rel] = h
 	}
 	meta.SizeBytes, meta.Files, _ = store.DirSize(tmpDir)
 
@@ -1007,7 +1114,7 @@ func cmdVerify(args []string) {
 				continue
 			}
 			if m.Meta == nil || len(m.Meta.Sha256) == 0 {
-				fmt.Printf("skip  %s (no manifest; redownload with --hashes)\n", store.RepoFromSlug(m.Slug))
+				fmt.Printf("skip  %s (no manifest)\n", store.RepoFromSlug(m.Slug))
 				continue
 			}
 			fmt.Printf("check %s (%d files)...\n", store.RepoFromSlug(m.Slug), len(m.Meta.Sha256))

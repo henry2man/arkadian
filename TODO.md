@@ -7,6 +7,14 @@ Wishlist and open tasks. One line per item. Add new ideas at the end.
 The NVMe on the DGX Spark is 1 TB. It fills up fast. Models must move to the NAS
 and come back on demand. One swap must take one command, not five.
 
+## How we work
+
+- [ ] TDD, every change. One cycle per change: edit the tests first so they fail
+      (**RED**), then write the code, then pass them (**GREEN**). No commit without
+      its check. `go test ./...` is the gate, next to `gofmt -l` and `go vet`.
+      Start where the logic is: `parseFlags`, `Slug`, `DfSpaces`, `RoomOK`/`maxUse`,
+      the `RemoveModel` guard, `parseLocation`, and the mode rule of `ark load`.
+
 ## Interface
 
 - [x] `ark list` shows size per model, size per vault, and free disk space, plus a
@@ -120,6 +128,9 @@ short name: `ARK_CONFIG`, `~/.ark`, `.arkmeta.json`, and the binary `ark`.
 
 - [x] Pick the display name: Arkadian.
 - [ ] Before you publish, check the name once more on GitHub and Homebrew.
+- [ ] Decide the `unload` question. `ark load` names "bring it here". Taking bytes
+      off the local disk is `ark mv <repo> --to <vault>` today. Add `unload` only if
+      typing `mv --to` aches after a month of real use.
 
 ## Site
 
