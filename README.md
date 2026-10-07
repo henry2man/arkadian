@@ -2,7 +2,7 @@
 
 **Tired of cleaning your disk?** Arkadian keeps Hugging Face models in **vaults**.
 A single-binary CLI (Go) that moves LLM models across storage tiers: a fast **local
-tier** (NVMe on your GPU box) and one or more **cold vaults** (Synology NAS, mounted
+tier** (NVMe on your GPU box) and one or more **cold vaults** (a network NAS, a mounted
 drive, another machine). `ark list` shows the size of every model, the size of every
 vault, and the free space left. Download once, verify, serve offline — even if
 Hugging Face itself disappears.
@@ -85,11 +85,11 @@ On first use `ark` writes `~/.arkadian/config.json` with a default setup.
 Adapt it by hand or with `ark vault add|rm`. Override the location with `ARK_CONFIG`.
 Set `"source": "modelscope"` to make ModelScope the default download source.
 
-### Synology setup (one-time)
+### Network NAS setup (one-time)
 
-1. DSM → Control Panel → **Terminal & SNMP** → enable SSH.
+1. In the NAS admin page, enable the SSH service.
 2. `ssh-copy-id user@nas` (ark uses BatchMode ssh; no interactive passwords).
-3. First `mv`/`download` creates `/volume1/ark/models` automatically.
+3. The first `mv`/`download` creates `<vault-root>/models` automatically.
 
 SMB/CIFS is *not* required (rsync-over-ssh is faster and preserves HF hardlinks).
 You can still point a `local`-kind vault at a mounted CIFS path if you prefer —
