@@ -222,16 +222,25 @@ func EnsureManifest(vault Vault, repo string) (*Meta, error) {
 }
 
 func Verify(vault Vault, repo string) error {
+	current, err := Manifest(vault, repo)
+	if err != nil {
+		return err
+	}
 	expected, err := ReadMeta(vault, repo)
 	if err != nil {
 		return err
 	}
 	if expected == nil {
-		return fmt.Errorf("%s in %s has no manifest; copy it with ark cp to establish one", repo, vault.Name)
-	}
-	current, err := Manifest(vault, repo)
-	if err != nil {
-		return err
+		// First manifest: establish the current bytes. This does not prove
+		// Hub authenticity; it records the state for future drift detection.
+		model, err := Inspect(vault, repo)
+		if err != nil {
+			return err
+		}
+		if !model.Reference {
+			return helper(vault, "save", vault.ModelDir(repo), current, nil)
+		}
+		return nil
 	}
 	if current.Digest != expected.Digest {
 		return fmt.Errorf("manifest mismatch for %s in %s", repo, vault.Name)
@@ -406,7 +415,16 @@ func (inventory *Inventory) Refresh(vault Vault) error {
 		meta, err := ReadMeta(vault, model.Repo)
 		if err != nil {
 			location.State = "corrupt"
-		} else if meta != nil && meta.VerifiedFingerprint == model.Fingerprint && meta.VerifiedAt != "" && !model.Reference {
+		} else if meta == nil {
+			// First observation: establish the manifest so the model is
+			// tracked for future drift detection. This does not prove Hub
+			// authenticity; it records the current state.
+			if _, err := EnsureManifest(vault, model.Repo); err != nil {
+				location.State = "corrupt"
+			} else {
+				location.State = "present"
+			}
+		} else if meta.VerifiedFingerprint == model.Fingerprint && meta.VerifiedAt != "" && !model.Reference {
 			location.State, location.VerifiedAt = "verified", meta.VerifiedAt
 		}
 		if model.Reference {
