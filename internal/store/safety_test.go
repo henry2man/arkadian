@@ -102,7 +102,7 @@ func TestTransferResumesAndSourceChangeProtectsData(test *testing.T) {
 		test.Fatal(err)
 	}
 	second := Vault{Name: "second", Type: "huggingface", Path: filepath.Join(test.TempDir(), "second")}
-	script = fmt.Sprintf("#!/bin/sh\n%s \"$@\" || exit\nprintf changed > %s\n", Quote(realRsync), Quote(filepath.Join(source.ModelDir("org/model"), "blobs", "weights")))
+	script = fmt.Sprintf("#!/bin/sh\ncase \"$*\" in *--version*) exec %s --version ;; esac\n%s \"$@\" || exit\nprintf changed > %s\n", Quote(realRsync), Quote(realRsync), Quote(filepath.Join(source.ModelDir("org/model"), "blobs", "weights")))
 	if err := os.WriteFile(filepath.Join(commands, "rsync"), []byte(script), 0o755); err != nil {
 		test.Fatal(err)
 	}

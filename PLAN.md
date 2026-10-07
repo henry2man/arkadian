@@ -188,8 +188,8 @@ Otherwise require `--rev`. A remote path is an SSH location, not a local mount.
 - [x] Run gofmt, go vet, go test, build, and a temporary-vault end-to-end flow.
 - [x] Make CI check first-implementation and main. Cross-build supported targets.
 - [x] Record real checks and simulated checks separately.
-- [ ] Run scripts/test.sh on linux/arm64, linux/amd64, and darwin/arm64. Local run
-      in an Ubuntu 24.04 container and CI matrix results are pending.
+- [ ] Run scripts/test.sh in CI on ubuntu-latest. On macOS install GNU rsync
+      with `brew install rsync`; ark rejects openrsync.
 - [ ] Validate Spark/USB/NAS when available. Exercise a large model and an
       inference runtime. These hardware checks were not available in this run.
 
