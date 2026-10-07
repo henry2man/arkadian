@@ -37,6 +37,7 @@ func Load() (*Config, error) {
 	if os.IsNotExist(err) {
 		c := Default()
 		_ = c.Save()
+		c.applyDefaults() // expand ~ now: the first run must not write to "./~"
 		return c, nil
 	}
 	if err != nil {
