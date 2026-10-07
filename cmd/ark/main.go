@@ -819,9 +819,15 @@ func listRisk(rows []modelRow) {
 	}
 	fmt.Println()
 	if len(onlyWarm) > 0 {
+		cold := coldVaultHint()
 		fmt.Printf("no cold copy (%d): a disk crash loses these\n", len(onlyWarm))
+		if cold == "<vault>" {
+			// no second vault yet: name one before the move command means anything
+			fmt.Println("  ark vault add nas user@nas:/volume1/ark")
+			cold = "nas"
+		}
 		for _, repo := range onlyWarm {
-			fmt.Printf("  ark mv %s --from %s --to %s\n", repo, firstLocalVault(), coldVaultHint())
+			fmt.Printf("  ark mv %s --from %s --to %s\n", repo, firstLocalVault(), cold)
 		}
 	}
 	if len(onlyCold) > 0 {

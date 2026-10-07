@@ -11,7 +11,6 @@ import (
 
 const (
 	defaultLocalRoot  = "~/ark/spark"
-	defaultRemoteRoot = "/volume1/ark"
 	defaultRsyncFlags = "-a --inplace --partial"
 )
 
@@ -51,14 +50,14 @@ func Load() (*Config, error) {
 	return &c, nil
 }
 
-// Default is the out-of-the-box config: a local tier and one remote tier.
+// Default is the out-of-the-box config: one local vault. A cold vault is yours
+// to name, so ark does not guess a host: ark vault add nas <user@host> <path>.
 func Default() *Config {
 	return &Config{
 		Vaults: map[string]store.Vault{
 			"spark": {Name: "spark", Kind: "local", Path: defaultLocalRoot},
-			"nas":   {Name: "nas", Kind: "remote", Host: "user@nas", Path: defaultRemoteRoot},
 		},
-		DefaultTo:  "nas",
+		DefaultTo:  "spark",
 		RsyncFlags: defaultRsyncFlags,
 	}
 }

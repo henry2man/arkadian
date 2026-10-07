@@ -69,7 +69,9 @@ vaults), and one download source in `PATH`: `hf` from `pip install huggingface_h
 
 ## First run
 
-On first use `ark` writes `~/.arkadian/config.json` with a default setup.
+On first use `ark` writes `~/.arkadian/config.json` with one local vault: `spark`
+at `~/ark/spark`. `ark` never guesses a host, so your cold vault is yours to name:
+`ark vault add nas user@nas:/volume1/ark`. After that the file reads:
 
 ```json
 {
@@ -77,7 +79,7 @@ On first use `ark` writes `~/.arkadian/config.json` with a default setup.
     "spark": { "kind": "local",  "path": "~/ark/spark" },
     "nas":   { "kind": "remote", "host": "user@nas", "path": "/volume1/ark" }
   },
-  "default_to": "nas",
+  "default_to": "spark",
   "rsync_flags": "-a --inplace --partial"
 }
 ```
@@ -134,7 +136,7 @@ Ten commands, no aliases, no second way to do the same thing.
 
 ```bash
 ark vault add spark ~/ark/spark                         # fast disk, where you work
-ark vault add nas   user@nas:/volume1/ark     # the cold copy, over ssh
+ark vault add nas   user@nas:/volume1/ark               # the cold copy, over ssh
 ark download Qwen/Qwen3-8B --hashes --to spark          # HF -> local vault
 ark mv Qwen/Qwen3-8B --from spark --to nas              # cold copy on the NAS, free the disk
 ark list                                                # sizes per vault + free space
