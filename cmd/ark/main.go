@@ -1,1349 +1,765 @@
-// Command ark (Arkadian) — custody of Hugging Face models across vaults.
-//
-//	ark list                     models in every vault, with free space
-//	ark download <repo> --to V   fetch from HF or ModelScope into a vault
-//	ark mv <repo> --from A --to B
-//	                           move a model between vaults, or link it
-//	ark rm <repo> [--vault V]    delete a model to free space
-//	ark path <repo>              the path for vLLM or transformers
-//	ark link <repo>              symlink a model for serving; unlink reverses it
-//	ark verify [repo]            checksum models (vs .arkmeta.json)
-//	ark info <repo>              show metadata
-//	ark vault ls|add|rm          manage vaults
-//	ark version                  print the version
 package main
 
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
+	"syscall"
+	"text/tabwriter"
 
 	"github.com/henry2man/arkadian/internal/config"
 	"github.com/henry2man/arkadian/internal/source"
 	"github.com/henry2man/arkadian/internal/store"
 )
 
-var cfg *config.Config
-
-// version is set at build time: -ldflags "-X main.version=v0.1.0"
 var version = "dev"
 
-func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "version", "--version", "-v":
-			printVersion()
-			return
-		}
-	}
-
-	c, err := config.Load()
-	if err != nil {
-		die("config: %v", err)
-	}
-	cfg = c
-
-	args := os.Args[1:]
-	if len(args) == 0 {
-		usage()
-		os.Exit(2)
-	}
-	cmd, rest := args[0], args[1:]
-	switch cmd {
-	case "list", "ls":
-		cmdList(rest)
-	case "download":
-		cmdDownload(rest)
-	case "load":
-		cmdLoad(rest)
-	case "mv", "move":
-		cmdMv(rest)
-	case "rm", "remove":
-		cmdRm(rest)
-	case "path":
-		cmdPath(rest)
-	case "link":
-		cmdLink(rest)
-	case "unlink":
-		cmdUnlink(rest)
-	case "verify":
-		cmdVerify(rest)
-	case "info":
-		cmdInfo(rest)
-	case "vault":
-		cmdVault(rest)
-	case "help", "--help", "-h":
-		usage()
-	default:
-		if use, gone := removed[cmd]; gone {
-			fmt.Fprintf(os.Stderr, "ark %s is gone. Use:\n  %s\n", cmd, use)
-			os.Exit(2)
-		}
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
-		usage()
-		os.Exit(2)
-	}
+var usages = map[string]string{
+	"list":    "list [model] [--vault V] [--json]",
+	"refresh": "refresh [--vault V]",
+	"pull":    "pull hf://org/model <destination> [--rev R] [--force]",
+	"cp":      "cp <model> <source> <destination> [--force]",
+	"mv":      "mv <model> <source> <destination> [--yes] [--force]",
+	"get":     "get <model> [--force]",
+	"evict":   "evict <model> <destination> [--yes] [--force]",
+	"rm":      "rm <model> <vault> [--yes] [--force]",
+	"sync":    "sync <source> <destination> [--force]",
+	"verify":  "verify [model] [--vault V]",
+	"path":    "path <model> [--vault V] [--rev R]",
+	"vault":   "vault add <name> <location> | ls | rm <name> [--yes]",
+	"version": "version",
 }
 
-// removed maps old command names to what replaces them. Muscle memory gets a
-// pointer, not a shrug.
 var removed = map[string]string{
-	"promote": "ark load <repo> --from <vault> --link   (or --copy)",
-	"demote":  "ark mv <repo> --from <local> --to <vault>",
-	"pull":    "ark load <repo> --from <vault> --link   (or --copy)",
-	"down":    "ark mv <repo> --from <local> --to <vault>",
-	"push":    "ark mv <repo> --from <local> --to <vault>",
-	"model":   "ark list, ark download, ark mv, ark rm, ark path",
-	"models":  "ark list",
-	"serve":   "ark link <repo>, then the two exports it prints",
-	"cp":      "ark mv <repo> --from A --to B --link (a move with no bytes)",
-	"copy":    "ark mv <repo> --from A --to B --link (a move with no bytes)",
+	"download": "ark pull hf://org/model <destination>", "load": "ark get <model>",
+	"link":   "mount the source, then use ark path <model> --vault <source> and ln -s",
+	"unlink": "remove the link with unlink or rm", "info": "ark list <model> --json",
+	"where": "ark list <model>", "ls": "ark list", "move": "ark mv", "remove": "ark rm",
+	"promote": "ark get <model>", "demote": "ark evict <model> <destination>",
+	"model": "ark list, ark pull, ark cp, ark mv, ark rm", "models": "ark list",
+	"serve": "ark path <model>", "copy": "ark cp <model> <source> <destination>",
 }
 
-// repoURL is the project home page.
-const repoURL = "https://github.com/henry2man/arkadian"
+type usageError struct{ message string }
 
-// printVersion prints a short about block: version, what it is, and the repo.
-func printVersion() {
-	fmt.Println("ark " + version + " — Arkadian")
-	fmt.Println("Custody of AI models across vaults: local disks, mounted drives")
-	fmt.Println("(SMB/NFS), and remote machines over ssh. Tired of cleaning your disk?")
-	fmt.Println("Repo and docs: " + repoURL)
-	os.Exit(0)
-}
+func (err usageError) Error() string { return err.message }
 
-func usage() {
-	fmt.Println(`ark — custody of Hugging Face models across vaults
+func main() { os.Exit(execute(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
-Usage:
-  ark <command> [args] [flags]
-
-Commands:
-  list                     Size per model, per vault, and free disk space
-  download <repo> --to V   Fetch from HF or ModelScope into vault V
-  load <repo> --from V     Make a model available here. --link or --copy
-  mv <repo> --from A --to B
-                           Move a model between vaults. --link moves no bytes
-  rm <repo> [--vault V]    Delete a model. Asks before it deletes
-  path <repo> [--vault V]  The path to hand to vLLM or transformers
-  link <repo>              Symlink a model for serving. unlink reverses it
-  verify [repo]            Check sha256 against .arkmeta.json
-  info <repo>              Stored metadata as JSON
-  vault ls|add|rm          Manage vaults
-  version                  Version, about, and the repo link
-
-Run 'ark <command> --help' for the flags of one command.
-
-Config: ` + config.Path() + `
-Vaults: local dir, mounted path (samba), or user@host:/path (rsync over ssh).`)
-}
-
-// cmdMv is the one move verb: it puts a model in another vault. It copies, then
-// deletes the source. --link skips the bytes: the target gets a symlink and the
-// source keeps the data.
-func cmdMv(args []string) {
-	if wantsHelp(args) {
-		abortUsage(helpMv)
-	}
-	pos, flags := parseFlags(args)
-	if len(pos) == 0 {
-		usageErr("usage: ark mv <org/model> --from <vault> --to <vault> [--link] [--yes]\nsee: ark mv --help")
-	}
-	repo, slug := pos[0], store.Slug(pos[0])
-	src, err := resolveSourceRepo(flagOr(flags, "from", ""), repo)
-	if err != nil {
-		if flags["from"] == "" {
-			die("no --from vault. Run: ark vault ls\nknown vaults: %s\nhint: ark mv %s --from <vault> --to <vault>",
-				strings.Join(sortedVaultNames(), ", "), repo)
+func help(output io.Writer, command string) {
+	if usage, found := usages[command]; found {
+		fmt.Fprintf(output, "usage: ark %s\n", usage)
+		if command == "evict" || command == "mv" {
+			fmt.Fprintln(output, "Copy and verify the destination before deleting source data.")
 		}
-		die("%v\nhint: run: ark list", err)
-	}
-	dst := mustVault(flags, "to", cfg.DefaultTo)
-	if src.Vault.Name == dst.Name {
-		fmt.Printf("ark: %s is already in vault %s\n", repo, dst.Name)
+		if command == "get" {
+			fmt.Fprintln(output, "Find an available copy and bring it into the default HF cache.")
+		}
+		if command == "sync" {
+			fmt.Fprintln(output, "Add source models to destination; never delete or copy backward.")
+		}
+		if command == "refresh" {
+			fmt.Fprintln(output, "Refresh inventory, not weights. Unreachable vaults remain unknown.")
+		}
 		return
 	}
-	if flags["link"] != "" {
-		// no question: nothing is deleted, the source keeps the bytes
-		mvAsLink(repo, slug, src.Vault, dst)
-		return
+	fmt.Fprintln(output, "Arkadian — model inventory and safe storage operations\nusage: ark <command> [arguments]")
+	for _, name := range []string{"list", "refresh", "pull", "cp", "mv", "get", "evict", "rm", "sync", "verify", "path", "vault", "version"} {
+		fmt.Fprintf(output, "  %s\n", usages[name])
 	}
-	if !hasFlag(args, "yes", "force") &&
-		!confirm(fmt.Sprintf("move %s: %s -> %s", repo, src.Vault.Name, dst.Name)) {
-		die("cancelled")
-	}
-	if err := copyModel(slug, src, dst); err != nil {
-		die("move: %v", err)
-	}
-	// Drop the source only after a complete copy.
-	if err := removeModel(src.Vault, slug); err != nil {
-		die("copied, but the source is still there: %v", err)
-	}
-	fmt.Printf("ark: moved %s: %s -> %s\n", repo, src.Vault.Name, dst.Name)
+	fmt.Fprintln(output, "Use ark <command> --help. Mount storage and configure SSH outside Arkadian.")
 }
 
-// maxUse is the used-share ceiling of a vault. Past it a copy stops being a
-// favour and becomes a full disk. Raise it only with a reason: ark keeps the
-// number, not a config key.
-const maxUse = 0.90
-
-// roomOK refuses a copy that would push the vault past maxUse. A vault that
-// cannot answer with its size lets the copy through: a missing statfs is not a
-// reason to block work.
-func roomOK(v store.Vault, need int64, force bool) {
-	if force || need <= 0 {
-		return
-	}
-	total, free, err := store.Free(v.Path)
-	if err != nil || total <= 0 {
-		return
-	}
-	used := total - free
-	if used+need > int64(float64(total)*maxUse) {
-		die("%s is %d%% full: %s needs %s, and that passes the %d%% limit.\n"+
-			"  ark load <repo> --from <vault> --link   a link uses no space\n"+
-			"  ark rm <repo> --vault %s             free space first\n"+
-			"  --force                                 copy anyway",
-			v.Name, int(100*used/total), v.Name, humanBytes(need), int(maxUse*100), v.Name)
-	}
-}
-
-// cmdLoad makes a model available on this machine: the one action with a
-// direction in its name. The mode is explicit, because the two modes differ
-// by 60 GB: --link points here, --copy brings the bytes and checks room first.
-func cmdLoad(args []string) {
-	if wantsHelp(args) {
-		abortUsage(helpLoad)
-	}
-	pos, flags := parseFlags(args)
-	if len(pos) == 0 {
-		usageErr("usage: ark load <org/model> --from <vault> --link|--copy\nsee: ark load --help")
-	}
-	linkMode, copyMode := flags["link"] != "", flags["copy"] != ""
-	if linkMode == copyMode {
-		usageErr("say which mode: ark load %s --from <vault> --link (no bytes) or --copy (real bytes)", pos[0])
-	}
-	repo, slug := pos[0], store.Slug(pos[0])
-	src, err := resolveSourceRepo(flagOr(flags, "from", ""), repo)
-	if err != nil {
-		if flags["from"] == "" {
-			die("no --from vault. Run: ark vault ls\nknown vaults: %s\nhint: ark load %s --from <vault> --link",
-				strings.Join(sortedVaultNames(), ", "), repo)
-		}
-		die("%v\nhint: run: ark list", err)
-	}
-	dst, err := reachableVault(flags["to"])
-	if err != nil {
-		die("%v", err)
-	}
-	if src.Vault.Name == dst.Name {
-		fmt.Printf("ark: %s is already in vault %s\n", repo, dst.Name)
-		return
-	}
-	if linkMode {
-		// nothing is deleted and no bytes move, so no question is asked
-		mvAsLink(repo, slug, src.Vault, dst)
-		return
-	}
-	if !hasFlag(args, "yes", "force") &&
-		!confirm(fmt.Sprintf("copy %s to %s: %s -> %s", repo, dst.Name, src.Vault.Name, dst.Name)) {
-		die("cancelled")
-	}
-	roomOK(dst, modelBytes(src), hasFlag(args, "force"))
-	if err := copyModel(slug, src, dst); err != nil {
-		die("load: %v", err)
-	}
-	fmt.Printf("ark: loaded %s -> %s (copy; %s still holds its own)\n", repo, dst.Name, src.Vault.Name)
-}
-
-// modelBytes returns the size of a model, from its manifest or from disk.
-func modelBytes(m store.Model) int64 {
-	if m.Meta != nil && m.Meta.SizeBytes > 0 {
-		return m.Meta.SizeBytes
-	}
-	n, _, _ := store.DirSize(m.Dir)
-	return n
-}
-
-// copyModel puts the bytes in another vault and deletes nothing.
-func copyModel(slug string, src store.Model, dst store.Vault) error {
-	if err := config.EnsureRemote(dst, sshRun); err != nil {
-		return fmt.Errorf("prepare %s: %w (tip: enable SSH on the host, and ssh-copy-id %s)", dst.Name, err, dst.Host)
-	}
-	srcPath, dstPath := src.Dir, dst.ModelDir(slug)
-	if src.Vault.Remote() {
-		srcPath = src.Vault.URL() + "/models/" + slug
-	}
-	if dst.Remote() {
-		dstPath = dst.URL() + "/models/" + slug
-	}
-	if src.Vault.Remote() || dst.Remote() {
-		// rsync streams remote to remote too, through this machine, no local disk
-		return rsyncCopy(srcPath, dstPath, cfg.RsyncFlags)
-	}
-	return store.CopyTree(srcPath, dstPath) // one disk: rsync would add nothing
-}
-
-// mvAsLink moves without bytes. The target vault holds a symlink and the source
-// vault keeps the data. The source must be a path this machine can open.
-func mvAsLink(repo, slug string, src, dst store.Vault) {
-	if src.Remote() {
-		die("%s is only reachable over ssh, and a link needs a real path. Mount that share\n(ark vault add %s samba <path>), or move without --link", repo, src.Name)
-	}
-	from, to := src.ModelDir(slug), dst.ModelDir(slug)
-	if st, err := os.Lstat(to); err == nil && st.Mode()&os.ModeSymlink == 0 {
-		die("%s is already a real copy in %s. Free the space first:\n  ark rm %s --vault %s", repo, dst.Name, repo, dst.Name)
-	}
-	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
-		die("%v", err)
-	}
-	if err := os.RemoveAll(to); err != nil {
-		die("%v", err)
-	}
-	if err := os.Symlink(from, to); err != nil {
-		die("link into %s: %v", dst.Name, errHint(err))
-	}
-	fmt.Printf("ark: %s is in %s now as a link. The bytes stay in %s\n", repo, dst.Name, src.Name)
-}
-
-// cmdRm deletes a model to free space. It asks first: this is the point of the
-// tool, so the question is the safety bar.
-func cmdRm(args []string) {
-	if wantsHelp(args) {
-		abortUsage(helpRm)
-	}
-	pos, flags := parseFlags(args)
-	if len(pos) == 0 {
-		usageErr("usage: ark rm <org/model> [--vault V] [--yes]\nsee: ark rm --help")
-	}
-	repo, slug := pos[0], store.Slug(pos[0])
-	var targets []store.Vault
-	if name := flags["vault"]; name != "" {
-		v, err := cfg.Vault(name)
-		if err != nil {
-			die("%v. Run: ark vault ls", err)
-		}
-		targets = []store.Vault{v}
-	} else {
-		for _, n := range sortedVaultNames() {
-			targets = append(targets, cfg.Vaults[n])
-		}
-	}
-	var found []store.Vault
-	for _, v := range targets {
-		if modelInVault(v, slug) {
-			found = append(found, v)
-		}
-	}
-	if len(found) == 0 {
-		die("%s is not in any vault. Run: ark list", repo)
-	}
-	if !hasFlag(args, "yes", "force") {
-		names := make([]string, 0, len(found))
-		for _, v := range found {
-			names = append(names, v.Name)
-		}
-		if !confirm(fmt.Sprintf("delete %s from %s? This cannot be undone", repo, strings.Join(names, ", "))) {
-			die("cancelled")
-		}
-	}
-	for _, v := range found {
-		if err := removeModel(v, slug); err != nil {
-			die("%s in %s: %v", repo, v.Name, errHint(err))
-		}
-		fmt.Printf("ark: deleted %s from %s\n", repo, v.Name)
-	}
-}
-
-// cmdPath prints the path of one model: what vLLM or transformers needs.
-func cmdPath(args []string) {
-	if wantsHelp(args) {
-		abortUsage(helpPath)
-	}
-	pos, flags := parseFlags(args)
-	if len(pos) == 0 {
-		usageErr("usage: ark path <org/model> [--vault V]\nsee: ark path --help")
-	}
-	m, err := resolveSourceRepo(flags["vault"], pos[0])
-	if err != nil {
-		die("%v", err)
-	}
-	if m.Vault.Remote() {
-		fmt.Printf("%s:%s\n", m.Vault.Host, m.Vault.ModelDir(store.Slug(pos[0])))
-		return
-	}
-	fmt.Println(m.Dir)
-}
-
-// cmdUnlink removes the serving symlink that ark link made.
-func cmdUnlink(args []string) {
-	if wantsHelp(args) {
-		abortUsage(helpUnlink)
-	}
-	pos, flags := parseFlags(args)
-	if len(pos) == 0 {
-		usageErr("usage: ark unlink <org/model> [--dir DIR]\nsee: ark unlink --help")
-	}
-	link := filepath.Join(linkTargetDir(flags), pos[0])
-	st, err := os.Lstat(link)
-	if err != nil {
-		die("no link at %s. Run: ark link %s", link, pos[0])
-	}
-	if st.Mode()&os.ModeSymlink == 0 {
-		die("%s is not a link. Not touching it", link)
-	}
-	if err := os.Remove(link); err != nil {
-		die("%v", errHint(err))
-	}
-	fmt.Printf("ark: unlinked %s\n", pos[0])
-}
-
-// removeModel deletes a model from one vault, local or remote.
-func removeModel(v store.Vault, slug string) error {
-	if v.Remote() {
-		_, err := sshRun(v.Host, fmt.Sprintf("rm -rf -- %q", v.ModelDir(slug)))
-		return err
-	}
-	return store.RemoveModel(v, slug)
-}
-
-// modelInVault reports whether a model dir exists in a vault.
-func modelInVault(v store.Vault, slug string) bool {
-	if v.Remote() {
-		out, err := sshRun(v.Host, fmt.Sprintf("test -d %q && echo yes", v.ModelDir(slug)))
-		return err == nil && strings.TrimSpace(out) == "yes"
-	}
-	st, err := os.Stat(v.ModelDir(slug))
-	return err == nil && st.IsDir()
-}
-
-// coldVaultHint names a cold vault (samba or remote) for hints.
-func coldVaultHint() string {
-	if cfg.DefaultTo != "" {
-		if v, err := cfg.Vault(cfg.DefaultTo); err == nil && v.KindLabel() != "local" {
-			return cfg.DefaultTo
-		}
-	}
-	for _, n := range sortedVaultNames() {
-		if cfg.Vaults[n].KindLabel() != "local" {
-			return n
-		}
-	}
-	return "<vault>"
-}
-
-// mustVault resolves the vault a flag names, or a config default. It never
-// guesses: without a name it stops and points at `ark vault ls`. A path also
-// works, so `--to /mnt/usb` needs no config entry.
-func mustVault(flags map[string]string, flag, def string) store.Vault {
-	name := flagOr(flags, flag, def)
-	if name == "" {
-		die("no --%s vault. Run: ark vault ls\nknown vaults: %s\nor pass a path: --%s /mnt/disk",
-			flag, strings.Join(sortedVaultNames(), ", "), flag)
-	}
-	v, err := cfg.Vault(name)
-	if err == nil {
-		return v
-	}
-	if strings.Contains(name, "://") || strings.Contains(name, ":/") ||
-		strings.HasPrefix(name, "/") || strings.HasPrefix(name, "~") || strings.HasPrefix(name, ".") {
-		v = parseLocation(name, name) // the same spellings `ark vault add` takes
-		v.Name = name
-		return v
-	}
-	die("%v. Run: ark vault ls", err)
-	return store.Vault{}
-}
-
-// hasFlag reports whether name appears as a bare flag.
-func hasFlag(args []string, names ...string) bool {
-	for _, a := range args {
-		for _, n := range names {
-			if a == "--"+n {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// ---------- help texts ----------
-
-const (
-	helpList = `usage: ark list [--help]
-
-List every model in every vault.
-First a summary: kind, model count, model size, and free disk space.
-Then one row per model: repo, vault, where, size, source, revision, date.
-SOURCE is where the model came from: hf, hf-transfer, obscura, or modelscope.
-At the end, ark flags the two states that bite: no cold copy, and cold only.
-
-Aliases: ark ls
-`
-	helpDownload = `usage: ark download <org/model> [flags]
-
-Fetch a model into a vault. The download lands in staging, then moves into
-the vault. Nothing is written straight into the vault. A sha256 manifest is
-always stored: a copy you cannot check is not a backup.
-
-A destination is required. Pass --to, or set default_to in the config.
-Sources cannot write over ssh, so the destination must be a local or samba
-(mounted) vault. Move it to a remote vault afterwards: ark mv <repo> --to V
-
-Flags:
-  --to V            Destination vault. Required unless default_to is set.
-  --rev R           Revision or tag. Default: main (master on ModelScope).
-  --source S        hf, hf-transfer, obscura, or modelscope. Default: auto.
-
-Examples:
-  ark download Qwen/Qwen3-8B --to spark
-  ark download Qwen/Qwen3-8B --to nas --rev v1.5
-  ark download Qwen/Qwen3-8B --source modelscope --rev master
-`
-	helpLoad = `usage: ark load <org/model> --from <vault> <mode> [flags]
-
-Make a model available on this machine. The mode is required: the two modes
-differ by 60 GB.
-
-Modes:
-  --link     A link in the local vault that points at the source. No bytes, no
-             space used, the source must be a path this machine can open.
-  --copy     Real bytes in the local vault. ark checks room first: a copy that
-             would leave the vault more than 90% full stops. See --force.
-
-Flags:
-  --from V    Source vault. Required. Run ` + "`ark vault ls`" + ` for the names.
-  --to V      Local vault to write to. Default: the first local or mounted one.
-  --force     Copy even when the vault passes the 90% limit.
-  --yes       Skip the confirmation question. For scripts.
-
-Examples:
-  ark load Qwen/Qwen3-8B --from nas --link   # serve it, copy nothing
-  ark load Qwen/Qwen3-8B --from nas --copy   # bring 15 GB, room checked
-`
-	helpMv = `usage: ark mv <org/model> --from A --to B [flags]
-
-The one move verb: it puts a model in another vault. It copies, then deletes
-the source. Any end works: local, samba, or remote, remote to remote included.
-
-Flags:
-  --from V   Source vault. Required. Run ` + "`ark vault ls`" + ` for the names.
-  --to V     Destination vault. Required unless default_to is set. A path
-             works too: --to /mnt/usb
-  --link     Move without bytes: B gets a symlink, A keeps the data. Needs a
-             source this machine can open (local or a mounted share).
-  --yes      Skip the confirmation question. For scripts.
-
-Examples:
-  ark mv Qwen/Qwen3-8B --from spark --to nas     the bytes leave the laptop
-  ark mv Qwen/Qwen3-8B --from nas --to spark     the bytes come back
-  ark mv Qwen/Qwen3-8B --from nas --to spark --link   load it, copy nothing
-  ark mv Qwen/Qwen3-8B --from nas --to backup    machine to machine, no local disk
-`
-	helpRm = `usage: ark rm <org/model> [flags]
-
-Delete a model to free space. It asks first: this is the point of the tool, so
-the question is the safety bar.
-
-Flags:
-  --vault V  Touch one vault only. Without it, every copy it finds.
-  --yes      Skip the confirmation question. For scripts.
-
-Examples:
-  ark rm Qwen/Qwen3-8B
-  ark rm Qwen/Qwen3-8B --vault spark --yes
-`
-	helpLink = `usage: ark link <org/model> [flags]
-
-Symlink a model into the local models dir. Nothing is copied.
-
-This link is for serving: a path for vLLM or any loader that reads ~/ark/models.
-For a model inside a vault without copying bytes, use: ark mv --link
-
-Flags:
-  --dir DIR   Where to put the symlink. Default: ~/ark/models
-
-When does a symlink work?
-  local vault        yes, always
-  samba over NFS     yes
-  samba over CIFS    usually no: the mount refuses symlink() with EOPNOTSUPP
-  remote vault       no: there is no path to point at. Move it in first:
-                     ark mv <repo> --from <remote> --to <local>
-The link points at the vault copy, so mv or rm breaks it. Check with ark list.
-`
-	helpUnlink = `usage: ark unlink <org/model> [--dir DIR]
-
-Remove the serving symlink that ark link made. It only removes a symlink, and
-refuses a real directory. Nothing in a vault is touched.
-`
-	helpVerify = `usage: ark verify [org/model]
-
-Check files against the sha256 manifest in .arkmeta.json. Without a repo it
-checks every model in every local and samba vault. Models with no manifest
-are skipped. Remote vaults are not scanned; run ark verify on that machine.
-
-Exit code 0 is clean. Exit code 1 means at least one mismatch. Good for cron.
-`
-	helpInfo = `usage: ark info <org/model>
-
-Print the stored metadata as JSON: repo, revision, size, source, sha256s.
-`
-	helpPath = `usage: ark path <org/model> [--vault V]
-
-Print the path of one model: what vLLM or transformers needs. A remote copy
-prints as user@host:path. A model in two vaults needs --vault.
-`
-	helpVault = `usage: ark vault <subcommand> [args]
-
-  ark vault ls                       Name, kind, and path of every vault
-  ark vault add <name> <location>    A path (/data, ~/, ./), a remote
-                                     host:/path, or ssh://user@host/path.
-                                     smb:// and nfs:// name a protocol ark does
-                                     not speak: mount them, then add the
-                                     mount point.
-  ark vault add <name> <local|samba> <path>   the two-word spelling
-  ark vault add <name> <user@host> <path>     the two-word spelling
-  ark vault rm <name>                Drop a vault from the config. Asks first
-
-Kinds:
-  local   A directory on this machine.
-  samba   A mounted path (CIFS/SMB or NFS). Used like a local dir.
-  remote  user@host, rsync over ssh. The path is the remote dir.
-
-A vault holds models. It has no download source. The source lives per model.
-
-Examples:
-  ark vault add usb /mnt/usb
-  ark vault add lab user@192.0.2.10 /vol1/models
-  ark vault add lab ssh://user@192.0.2.10/vol1/models
-`
-)
-
-// ---------- helpers ----------
-
-// wantsHelp reports whether the args ask for help.
-func wantsHelp(args []string) bool {
-	for _, a := range args {
-		if a == "-h" || a == "--help" || a == "help" {
-			return true
-		}
-	}
-	return false
-}
-
-// abortUsage prints command help and stops.
-func abortUsage(text string) {
-	fmt.Print(text)
-	os.Exit(0)
-}
-
-// confirm asks yes/no on the terminal. Default is no.
-func confirm(prompt string) bool {
-	fmt.Printf("%s [y/N] ", prompt)
-	reader := bufio.NewReader(os.Stdin)
-	answer, _ := reader.ReadString('\n')
-	switch strings.ToLower(strings.TrimSpace(answer)) {
-	case "y", "yes":
-		return true
-	}
-	return false
-}
-
-// usageErr reports a wrong command line. Exit 2, the bad-usage code.
-func usageErr(f string, a ...any) {
-	fmt.Fprintf(os.Stderr, "ark: "+f+"\n", a...)
-	os.Exit(2)
-}
-
-func die(f string, a ...any) {
-	fmt.Fprintf(os.Stderr, "ark: "+f+"\n", a...)
-	os.Exit(1)
-}
-
-func run(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-// sshRun executes cmd on host (non-interactive).
-func sshRun(host, cmd string) (string, error) {
-	out, err := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, cmd).CombinedOutput()
-	return string(out), err
-}
-
-// parseFlags extracts --key value pairs; returns positional and map.
-func parseFlags(args []string) ([]string, map[string]string) {
-	pos := []string{}
+func parseArgs(command string, args []string) ([]string, map[string]string, error) {
+	values := map[string][]string{"list": {"vault"}, "refresh": {"vault"}, "pull": {"rev"}, "verify": {"vault"}, "path": {"vault", "rev"}}
+	switches := map[string][]string{"list": {"json"}, "pull": {"force"}, "cp": {"force"}, "mv": {"yes", "force"}, "get": {"force"}, "evict": {"yes", "force"}, "rm": {"yes", "force"}, "sync": {"force"}, "vault": {"yes"}}
+	positions := []string{}
 	flags := map[string]string{}
-	for i := 0; i < len(args); i++ {
-		if !strings.HasPrefix(args[i], "--") {
-			pos = append(pos, args[i])
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--" {
+			positions = append(positions, args[index+1:]...)
+			break
+		}
+		if !strings.HasPrefix(argument, "-") {
+			positions = append(positions, argument)
 			continue
 		}
-		name := strings.TrimPrefix(args[i], "--")
-		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
-			flags[name] = args[i+1] // --to nas
-			i++
+		name, value, assigned := strings.Cut(strings.TrimPrefix(argument, "--"), "=")
+		if flags[name] != "" {
+			return nil, nil, usageError{"duplicate option --" + name}
+		}
+		if slices.Contains(switches[command], name) {
+			if assigned {
+				return nil, nil, usageError{"--" + name + " takes no value"}
+			}
+			flags[name] = "true"
 			continue
 		}
-		flags[name] = "true" // bare switch: --link, --copy, --yes, --force
-	}
-	return pos, flags
-}
-
-// resolveSource finds where a repo lives: local vault first, then remotes.
-func resolveSource(repo string) (store.Model, error) {
-	slug := store.Slug(repo)
-	var localName string
-	// local vaults first
-	for name, v := range cfg.Vaults {
-		if v.Remote() {
-			continue
+		if !strings.HasPrefix(argument, "--") || !slices.Contains(values[command], name) {
+			return nil, nil, usageError{"unknown option " + argument}
 		}
-		localName = name
-		d := v.ModelDir(slug)
-		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
-			m, _ := store.ReadMeta(d)
-			return store.Model{Vault: v, Slug: slug, Dir: d, Meta: m}, nil
-		}
-	}
-	for name, v := range cfg.Vaults {
-		if !v.Remote() || name == localName {
-			continue
-		}
-		out, _ := sshRun(v.Host, fmt.Sprintf("test -d %q && echo yes", v.ModelDir(slug)))
-		if strings.TrimSpace(out) == "yes" {
-			return store.Model{Vault: v, Slug: slug, Dir: v.ModelDir(slug)}, nil
-		}
-	}
-	return store.Model{}, fmt.Errorf("model %q not found in any vault (try: ark download %s)", repo, repo)
-}
-
-// rsyncCopy copies a model dir between vaults with checksums.
-// rsyncCopy copies a tree with the system rsync. Either side can be a
-// user@host:path URL; remote to remote streams through this machine.
-func rsyncCopy(srcDir, dstDir string, flags string) error {
-	// ponytail: a colon means a remote URL. Ceiling: a local path with a colon in
-	// its name skips its mkdir and rsync fails. Fix: pass the vault, not a string.
-	if !strings.Contains(dstDir, ":") {
-		if err := os.MkdirAll(dstDir, 0o755); err != nil {
-			return err
-		}
-	}
-	args := strings.Fields(flags)
-	args = append(args, srcDir+"/", dstDir+"/")
-	return run("rsync", args...)
-}
-
-// humanBytes formats byte counts.
-func humanBytes(n int64) string {
-	units := []string{"B", "K", "M", "G", "T", "P"}
-	f := float64(n)
-	i := 0
-	for f >= 1024 && i < len(units)-1 {
-		f /= 1024
-		i++
-	}
-	return fmt.Sprintf("%.1f%s", f, units[i])
-}
-
-// ---------- commands ----------
-
-// modelRow is one line of the `ark list` table.
-type modelRow struct {
-	repo, vault, where, size, src, rev, date string
-}
-
-// vsum is the per-vault line above the table: what it holds and its free space.
-type vsum struct {
-	name, kind string
-	models     int
-	bytes      int64
-	total      int64
-	free       int64
-	spaceOK    bool
-}
-
-func cmdList(args []string) {
-	if wantsHelp(args) {
-		abortUsage(helpList)
-	}
-	var rows []modelRow
-	var sums []vsum
-
-	for _, name := range sortedVaultNames() {
-		v := cfg.Vaults[name]
-		s := vsum{name: name, kind: v.KindLabel()}
-		if v.Remote() {
-			if out, err := sshRun(v.Host, fmt.Sprintf("df -Pk %q", v.Path)); err == nil {
-				s.total, s.free, s.spaceOK = store.DfSpaces(out)
+		if !assigned {
+			index++
+			if index >= len(args) || strings.HasPrefix(args[index], "--") {
+				return nil, nil, usageError{"missing value for --" + name}
 			}
-			models, err := store.ListRemote(v, sshRun)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "ark: vault %s: warning: %v\n", name, err)
-				continue
-			}
-			for _, m := range models {
-				r := modelRow{repo: store.RepoFromSlug(m.Slug), vault: name, where: v.KindLabel()}
-				if m.Meta != nil && m.Meta.Repo != "" {
-					r.size, r.rev, r.date = humanBytes(m.Meta.SizeBytes), m.Meta.Revision, m.Meta.Downloaded.Format("2006-01-02")
-					r.src = m.Meta.Source
-					s.bytes += m.Meta.SizeBytes
-				} else {
-					r.size, r.rev, r.date = "?", "-", "-"
-				}
-				s.models++
-				rows = append(rows, r)
-			}
-			sums = append(sums, s)
-			continue
+			value = args[index]
 		}
-		if t, f, err := store.Free(v.Path); err == nil {
-			s.total, s.free, s.spaceOK = t, f, true
+		if value == "" {
+			return nil, nil, usageError{"empty value for --" + name}
 		}
-		models, err := store.ListLocal(v)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ark: vault %s: %v\n", name, err)
-			continue
-		}
-		for _, m := range models {
-			r := modelRow{repo: store.RepoFromSlug(m.Slug), vault: name, where: v.KindLabel(),
-				rev: "-", date: "-", size: "?", src: "-"}
-			sz, _, derr := store.DirSize(m.Dir)
-			if m.Meta != nil && m.Meta.SizeBytes > 0 {
-				sz, derr = m.Meta.SizeBytes, nil // the manifest also covers a linked model
-			}
-			if derr == nil {
-				s.bytes += sz
-				r.size = humanBytes(sz)
-			}
-			if m.Meta != nil {
-				r.rev = m.Meta.Revision
-				if s := m.Meta.Source; s != "" {
-					r.src = s
-				}
-				if !m.Meta.Downloaded.IsZero() {
-					r.date = m.Meta.Downloaded.Format("2006-01-02")
-				}
-			}
-			if st, err := os.Lstat(m.Dir); err == nil && st.Mode()&os.ModeSymlink != 0 {
-				r.where = "link" // an ark mv --link row: the bytes live in another vault
-			}
-			s.models++
-			rows = append(rows, r)
-		}
-		sums = append(sums, s)
+		flags[name] = value
 	}
-
-	w := [4]int{len("VAULT"), len("KIND"), len("MODELS"), len("MODELS SIZE")}
-	for _, s := range sums {
-		w[0] = max(w[0], len(s.name))
-		w[1] = max(w[1], len(s.kind))
+	counts := map[string][2]int{"list": {0, 1}, "refresh": {0, 0}, "pull": {2, 2}, "cp": {3, 3}, "mv": {3, 3}, "get": {1, 1}, "evict": {2, 2}, "rm": {2, 2}, "sync": {2, 2}, "verify": {0, 1}, "path": {1, 1}, "version": {0, 0}, "vault": {1, 3}}
+	count := counts[command]
+	if len(positions) < count[0] || len(positions) > count[1] {
+		return nil, nil, usageError{"wrong number of arguments"}
 	}
-	fmt.Printf("%-*s  %-6s  %6s  %11s  %s\n", w[0], "VAULT", "KIND", "MODELS", "MODEL SIZE", "DISK")
-	for _, s := range sums {
-		disk := "?"
-		if s.spaceOK {
-			disk = fmt.Sprintf("%s free of %s", humanBytes(s.free), humanBytes(s.total))
-			if s.total > 0 && s.free*10 < s.total {
-				disk += "  LOW"
-			}
-		}
-		fmt.Printf("%-*s  %-6s  %6d  %11s  %s\n", w[0], s.name, s.kind, s.models,
-			humanBytes(s.bytes), disk)
-	}
-
-	if len(rows) == 0 {
-		fmt.Println("\nno models yet. Run: ark download <org/model>")
-		return
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].repo != rows[j].repo {
-			return rows[i].repo < rows[j].repo
-		}
-		return rows[i].vault < rows[j].vault
-	})
-	cw := [5]int{len("REPO"), len("VAULT"), len("WHERE"), len("SIZE"), len("SOURCE")}
-	for _, r := range rows {
-		cw[0] = max(cw[0], len(r.repo))
-		cw[1] = max(cw[1], len(r.vault))
-		cw[2] = max(cw[2], len(r.where))
-		cw[3] = max(cw[3], len(r.size))
-		cw[4] = max(cw[4], len(r.src))
-	}
-	fmt.Printf("\n%-*s  %-*s  %-*s  %*s  %-*s  %-7s  %s\n", cw[0], "REPO", cw[1], "VAULT",
-		cw[2], "WHERE", cw[3], "SIZE", cw[4], "SOURCE", "REVISION", "DATE")
-	for _, r := range rows {
-		fmt.Printf("%-*s  %-*s  %-*s  %*s  %-*s  %-7s  %s\n", cw[0], r.repo, cw[1], r.vault,
-			cw[2], r.where, cw[3], r.size, cw[4], r.src, trunc(r.rev, 7), r.date)
-	}
-	listRisk(rows)
+	return positions, flags, nil
 }
 
-// listRisk points out the two states that bite: a model with no cold copy, and
-// a model that only a cold vault holds. It prints nothing when all is well.
-func listRisk(rows []modelRow) {
-	warm := map[string]bool{}
-	cold := map[string]bool{}
-	links := 0
-	for _, r := range rows {
-		if r.where == "link" {
-			links++ // reachable here, but the bytes stay where they are
-		}
-		if r.where == "local" || r.where == "link" {
-			warm[r.repo] = true
-		} else {
-			cold[r.repo] = true // a samba mount or a remote vault is a cold copy
-		}
-	}
-	var onlyWarm, onlyCold []string
-	for repo := range warm {
-		if !cold[repo] {
-			onlyWarm = append(onlyWarm, repo)
-		}
-	}
-	for repo := range cold {
-		if !warm[repo] {
-			onlyCold = append(onlyCold, repo)
-		}
-	}
-	sort.Strings(onlyWarm)
-	sort.Strings(onlyCold)
-	if len(onlyWarm) == 0 && len(onlyCold) == 0 {
-		switch {
-		case links > 0:
-			fmt.Printf("\n%d row(s) are links: the bytes stay in the vault that holds them\n", links)
-		case len(rows) > 0:
-			fmt.Println("\nevery model has a copy in more than one vault")
-		}
-		return
-	}
-	fmt.Println()
-	if len(onlyWarm) > 0 {
-		cold := coldVaultHint()
-		fmt.Printf("no cold copy (%d): a disk crash loses these\n", len(onlyWarm))
-		if cold == "<vault>" {
-			// no second vault yet: name one before the move command means anything
-			fmt.Println("  ark vault add nas user@nas:/volume1/ark")
-			cold = "nas"
-		}
-		for _, repo := range onlyWarm {
-			fmt.Printf("  ark mv %s --from %s --to %s\n", repo, firstLocalVault(), cold)
-		}
-	}
-	if len(onlyCold) > 0 {
-		fmt.Printf("cold only (%d): not on local disk, slow or offline to serve\n", len(onlyCold))
-		for _, repo := range onlyCold {
-			fmt.Printf("  ark load %s --from %s --link\n", repo, coldVaultHint())
-		}
-	}
-}
-
-func cmdDownload(args []string) {
-	if wantsHelp(args) {
-		abortUsage(helpDownload)
-	}
-	pos, flags := parseFlags(args)
-	if len(pos) == 0 {
-		usageErr("usage: ark download <org/model> [--to vault] [--rev revision] [--source name]\nsee: ark download --help")
-	}
-	repo := pos[0]
-	if flags["engine"] != "" {
-		die("there is no --engine. Use --source %s (hf, hf-transfer, obscura, modelscope)", flags["engine"])
-	}
-	toName := cfg.DefaultTo
-	usedDefault := true
-	if v, ok := flags["to"]; ok {
-		toName, usedDefault = v, false
-	}
-	if toName == "" {
-		die("no destination. Pick a vault: ark download %s --to <vault>\nknown vaults: %s\nor set default_to in %s",
-			repo, strings.Join(sortedVaultNames(), ", "), config.Path())
-	}
-	vault, err := cfg.Vault(toName)
-	if err != nil {
-		vault, err = reachableVault(toName)
-		if err != nil {
-			die("%v", err)
-		}
-	}
-	if vault.Remote() {
-		die("--to must be a LOCAL or SAMBA vault (sources cannot write over ssh). Download it locally, then: ark mv %s --to %s", repo, toName)
-	}
-	dest := "vault " + vault.Name
-	if usedDefault {
-		dest += " (default_to)"
-	}
-	eng, err := source.Detect(flagOr(flags, "source", cfg.Source))
-	if err != nil {
-		die("%v", err)
-	}
-	slug := store.Slug(repo)
-	// stage next to the vault: the move into it is then a rename, not a copy
-	dir := filepath.Dir(vault.Path)
-	staging := filepath.Join(dir, "staging")
-	if dir == "." {
-		staging = filepath.Join(os.TempDir(), "ark-staging") // never the folder you ran from
-	}
-	tmpDir := filepath.Join(staging, slug)
-	os.RemoveAll(tmpDir)
-	defer os.RemoveAll(tmpDir)
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		die("%v", err)
-	}
-
-	fmt.Printf("ark: downloading %s via %s -> staging for %s\n", repo, eng.Name(), dest)
-	if err := eng.Fetch(repo, flags["rev"], tmpDir); err != nil {
-		die("download failed: %v", err)
-	}
-
-	meta := store.Meta{
-		Repo:       repo,
-		RepoType:   flagOr(flags, "repo-type", "model"),
-		Revision:   flagOr(flags, "rev", "main"),
-		Source:     eng.Name(),
-		Downloaded: time.Now().UTC(),
-	}
-	// The manifest is not optional: a copy you cannot check is not a backup.
-	fmt.Println("ark: hashing files (manifest)...")
-	meta.Sha256 = map[string]string{}
-	for _, rel := range source.ListFiles(tmpDir) {
-		h, err := store.Sha256File(filepath.Join(tmpDir, rel))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ark: warn: hash %s: %v\n", rel, err)
-			continue
-		}
-		meta.Sha256[rel] = h
-	}
-	meta.SizeBytes, meta.Files, _ = store.DirSize(tmpDir)
-
-	// local target: hardlink-copy, else rsync to remote.
-	dst := vault.ModelDir(slug)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		die("%v", err)
-	}
-	if err := store.CopyTree(tmpDir, dst); err != nil {
-		die("move to vault: %v", err)
-	}
-	if err := store.WriteMeta(dst, &meta); err != nil {
-		die("%v", err)
-	}
-	fmt.Printf("ark: %s ok -> %s (%d files, %s)\n", repo, vault.URL(), meta.Files, humanBytes(meta.SizeBytes))
-
-}
-
-func cmdLink(args []string) {
-	if wantsHelp(args) {
-		abortUsage(helpLink)
-	}
-	pos, flags := parseFlags(args)
-	if len(pos) == 0 {
-		usageErr("usage: ark link <org/model> [--dir DIR]\nsee: ark link --help")
-	}
-	repo := pos[0]
-	m, err := resolveSource(repo)
-	if err != nil {
-		die("%v", err)
-	}
-	if m.Vault.Remote() {
-		die("%s lives only on remote vault %s — there is no path to link. Run: ark mv %s --from %s --to <local>", repo, m.Vault.Name, repo, m.Vault.Name)
-	}
-	linkModel(repo, linkTargetDir(flags), m.Vault)
-}
-
-// linkTargetDir resolves where a serving link goes: --dir, else the default.
-func linkTargetDir(flags map[string]string) string {
-	return config.Expand(flagOr(flags, "dir", "~/ark/models"))
-}
-
-// linkModel symlinks a vault model into dir. It works when the vault is a path
-// on this machine and that filesystem takes symlinks. See helpLink.
-func linkModel(repo, dir string, v store.Vault) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		die("%v", err)
-	}
-	link := filepath.Join(dir, repo) // keep the org/name hierarchy readable
-	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
-		die("%v", err)
-	}
-	if err := os.RemoveAll(link); err != nil {
-		die("%v", err)
-	}
-	if err := os.Symlink(v.ModelDir(store.Slug(repo)), link); err != nil {
-		hint := ""
-		if v.KindLabel() == "samba" {
-			hint = "\nhint: most CIFS/SMB mounts cannot hold symlinks. Mount with NFS, " +
-				"or move it local first: ark mv " + repo + " --from <vault> --to <local>"
-		}
-		die("%s: %v%s", link, errHint(err), hint)
-	}
-	fmt.Printf("ark: linked %s -> %s\n", repo, v.ModelDir(store.Slug(repo)))
-	fmt.Println("serve it offline:")
-	fmt.Println("  export HF_HUB_OFFLINE=1")
-	fmt.Printf("  export ARK_MODEL_PATH=%s\n", link)
-}
-
-func cmdVerify(args []string) {
-	if wantsHelp(args) {
-		abortUsage(helpVerify)
-	}
-	repoFilter := ""
-	if len(args) > 0 {
-		repoFilter = args[0]
-	}
-	var checked, bad int
-	for _, name := range sortedVaultNames() {
-		v := cfg.Vaults[name]
-		if v.Remote() {
-			// ponytail: remote vaults are not scanned. Ceiling: remote bit-rot stays
-			// unseen. Upgrade: stream the hashes with one ssh call per model.
-			continue
-		}
-		models, _ := store.ListLocal(v)
-		for _, m := range models {
-			if repoFilter != "" && store.RepoFromSlug(m.Slug) != repoFilter {
-				continue
-			}
-			if m.Meta == nil || len(m.Meta.Sha256) == 0 {
-				fmt.Printf("skip  %s (no manifest)\n", store.RepoFromSlug(m.Slug))
-				continue
-			}
-			fmt.Printf("check %s (%d files)...\n", store.RepoFromSlug(m.Slug), len(m.Meta.Sha256))
-			for rel, want := range m.Meta.Sha256 {
-				got, err := store.Sha256File(filepath.Join(m.Dir, rel))
-				checked++
-				if err != nil || got != want {
-					bad++
-					fmt.Printf("  BITROT %s: %v\n", rel, errHint(err))
-				}
-			}
-		}
-	}
-	fmt.Printf("ark: %d files checked, %d mismatches\n", checked, bad)
-	if bad > 0 {
-		os.Exit(1)
-	}
-}
-
-func cmdInfo(args []string) {
-	if wantsHelp(args) {
-		abortUsage(helpInfo)
-	}
+func execute(args []string, input io.Reader, output, diagnostics io.Writer) int {
 	if len(args) == 0 {
-		usageErr("usage: ark info <org/model>\nsee: ark info --help")
+		help(diagnostics, "")
+		return 2
 	}
-	m, err := resolveSource(args[0])
-	if err != nil {
-		die("%v", err)
+	command := args[0]
+	if command == "--help" || command == "-h" || command == "help" {
+		help(output, "")
+		return 0
 	}
-	out := map[string]any{"repo": args[0], "vault": m.Vault.Name, "path": m.Dir}
-	if m.Meta != nil {
-		b, _ := json.Marshal(m.Meta)
-		json.Unmarshal(b, &out)
+	if command == "--version" || command == "-v" {
+		command = "version"
 	}
-	b, _ := json.MarshalIndent(out, "", "  ")
-	fmt.Println(string(b))
-}
-
-// parseLocation reads a one-argument vault location: a path, host:/path, or
-// ssh://[user@host]/path. smb:// and friends name a protocol ark does not
-// speak: that one needs a mount first.
-func parseLocation(name, loc string) store.Vault {
-	if i := strings.Index(loc, "://"); i >= 0 {
-		scheme, rest := strings.ToLower(loc[:i]), loc[i+3:]
-		switch scheme {
-		case "file":
-			return store.Vault{Kind: "local", Path: config.Expand(rest)}
-		case "ssh":
-			host, path := rest, ""
-			if slash := strings.Index(rest, "/"); slash >= 0 {
-				// keep the leading slash: a remote path stays absolute
-				host, path = rest[:slash], rest[slash:]
-			}
-			if path == "" {
-				usageErr("ssh://%s carries no path. Use: ark vault add %s ssh://<user@host>/<path>", host, name)
-			}
-			if host == "" {
-				host = "localhost"
-			}
-			return store.Vault{Kind: "remote", Host: host, Path: path}
-		default:
-			usageErr("%s:// names a protocol ark does not speak. Mount the share, then:\n  ark vault add %s samba <mounted-path>", scheme, name)
-		}
-	}
-	switch path := config.Expand(loc); {
-	case strings.HasPrefix(loc, "/") || strings.HasPrefix(loc, "~") || strings.HasPrefix(loc, "."):
-		return store.Vault{Kind: "local", Path: path}
-	case strings.Contains(loc, ":"): // the rsync spelling: host:/path
-		host, remote, ok := strings.Cut(loc, ":")
-		if ok && strings.HasPrefix(remote, "/") {
-			return store.Vault{Kind: "remote", Host: host, Path: remote}
-		}
-	}
-	usageErr("%s is not a vault location. Use one of:\n  ark vault add %s <path>\n  ark vault add %s <user@host> <path>\n  ark vault add %s ssh://<user@host>/<path>", loc, name, name, name)
-	return store.Vault{}
-}
-
-func cmdVault(args []string) {
-	if len(args) == 0 {
-		fmt.Print(helpVault)
-		os.Exit(2)
-	}
-	if wantsHelp(args) {
-		abortUsage(helpVault)
-	}
-	switch args[0] {
-	case "ls":
-		for _, n := range sortedVaultNames() {
-			v := cfg.Vaults[n]
-			fmt.Printf("%-10s %-7s %s\n", n, v.KindLabel(), v.URL())
-		}
-	case "add":
-		if len(args) == 3 {
-			cfg.Vaults[args[1]] = parseLocation(args[1], args[2])
-		} else if len(args) < 4 {
-			usageErr("usage:\n  ark vault add <name> <path>\n  ark vault add <name> local <path>\n  ark vault add <name> samba <mounted-path>\n  ark vault add <name> <user@host> <path>\n  ark vault add <name> ssh://<user@host>/<path>")
+	if _, found := usages[command]; !found {
+		if replacement, found := removed[command]; found {
+			fmt.Fprintf(diagnostics, "ark %s is retired; use: %s\n", command, replacement)
 		} else {
-			v := store.Vault{Kind: "local"}
-			switch kind := strings.ToLower(args[2]); kind {
-			case "local":
-				v.Path = config.Expand(args[3])
-			case "samba", "smb", "mount", "cifs":
-				v.Kind = "samba" // a mounted path: same code path as local
-				v.Path = config.Expand(args[3])
-			case "remote": // the old 4-word spelling: point at the short one
-				usageErr("no remote keyword. Use: ark vault add %s <user@host> <path>", args[1])
-			default: // a host in the kind slot: user@host
-				if strings.Contains(args[2], "://") {
-					usageErr("one location is enough: ark vault add %s ssh://<user@host>/<path>", args[1])
-				}
-				v.Kind, v.Host, v.Path = "remote", args[2], args[3]
-			}
-			cfg.Vaults[args[1]] = v
+			fmt.Fprintf(diagnostics, "unknown command %q\n", command)
 		}
-		v := cfg.Vaults[args[1]]
-		if err := cfg.Save(); err != nil {
-			die("%v", err)
-		}
-		fmt.Printf("vault %s added (%s): %s\n", args[1], v.KindLabel(), v.URL())
-	case "rm":
-		if len(args) < 2 {
-			usageErr("usage: ark vault rm <name>\nsee: ark vault --help")
-		}
-		name := args[1]
-		v, ok := cfg.Vaults[name]
-		if !ok {
-			die("no vault %q. Known vaults: %s", name, strings.Join(sortedVaultNames(), ", "))
-		}
-		if !hasFlag(args[2:], "yes", "force") &&
-			!confirm(fmt.Sprintf("drop vault %s (%s) from the config? Files stay on disk at %s", name, v.KindLabel(), v.Path)) {
-			die("cancelled")
-		}
-		delete(cfg.Vaults, name)
-		if err := cfg.Save(); err != nil {
-			die("%v", err)
-		}
-		fmt.Printf("vault %s removed from the config. Files on disk were not touched.\n", name)
-	default:
-		die("unknown vault subcommand")
+		return 2
 	}
+	if slices.Contains(args[1:], "--help") || slices.Contains(args[1:], "-h") {
+		help(output, command)
+		return 0
+	}
+	positions, flags, err := parseArgs(command, args[1:])
+	if err != nil {
+		fmt.Fprintln(diagnostics, err)
+		help(diagnostics, command)
+		return 2
+	}
+	if command == "version" {
+		fmt.Fprintf(output, "ark %s\nArkadian — model inventory and safe storage operations\nhttps://github.com/henry2man/arkadian\n", version)
+		return 0
+	}
+	if err := os.MkdirAll(filepath.Dir(config.Path()), 0o700); err != nil {
+		fmt.Fprintln(diagnostics, err)
+		return 1
+	}
+	lock, err := os.OpenFile(filepath.Join(filepath.Dir(config.Path()), ".ark.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		fmt.Fprintln(diagnostics, err)
+		return 1
+	}
+	defer lock.Close()
+	// ponytail: one process per config; use per-vault locks if concurrent transfers are needed.
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		fmt.Fprintln(diagnostics, "another Arkadian operation is using this configuration; retry after it finishes")
+		return 1
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	configuration, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(diagnostics, "config:", err)
+		return 1
+	}
+	application := &app{configuration: configuration, input: bufio.NewReader(input), output: output, diagnostics: diagnostics}
+	if command == "vault" {
+		err = application.vault(positions, flags)
+	} else {
+		application.inventory, application.hasInventory, err = store.ReadInventory(config.InventoryPath())
+		if err == nil {
+			err = application.run(command, positions, flags)
+		}
+	}
+	if err != nil {
+		fmt.Fprintln(diagnostics, "ark:", err)
+		var invalid usageError
+		if errors.As(err, &invalid) {
+			help(diagnostics, command)
+			return 2
+		}
+		return 1
+	}
+	return 0
 }
 
-// ---------- small utils ----------
-
-func flagOr(flags map[string]string, k, def string) string {
-	if v, ok := flags[k]; ok {
-		return v
-	}
-	return def
+type app struct {
+	configuration *config.Config
+	inventory     *store.Inventory
+	hasInventory  bool
+	input         *bufio.Reader
+	output        io.Writer
+	diagnostics   io.Writer
 }
 
-func sortedVaultNames() []string {
-	var names []string
-	for n := range cfg.Vaults {
-		names = append(names, n)
+func (application *app) names() []string {
+	names := []string{}
+	for name := range application.configuration.Vaults {
+		names = append(names, name)
 	}
 	sort.Strings(names)
 	return names
 }
 
-// reachableVault returns a vault this machine can open a path in: local or
-// samba. An empty name picks the first one. It never returns a remote vault.
-func reachableVault(name string) (store.Vault, error) {
-	if name != "" {
-		v, err := cfg.Vault(name)
+func (application *app) confirm(flags map[string]string, message string) error {
+	if flags["yes"] != "" {
+		return nil
+	}
+	fmt.Fprintf(application.diagnostics, "%s [y/N]: ", message)
+	answer, err := application.input.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if strings.ToLower(strings.TrimSpace(answer)) != "y" && strings.ToLower(strings.TrimSpace(answer)) != "yes" {
+		return fmt.Errorf("cancelled; use --yes for scripts")
+	}
+	return nil
+}
+
+func (application *app) save() error {
+	if err := store.AtomicJSON(config.InventoryPath(), application.inventory); err != nil {
+		return fmt.Errorf("data retained but inventory save failed: %w; run ark refresh", err)
+	}
+	return nil
+}
+
+func (application *app) refresh(names ...string) error {
+	var failures []error
+	for _, name := range names {
+		vault := application.configuration.Vaults[name]
+		if err := application.inventory.Refresh(vault); err != nil {
+			fmt.Fprintln(application.diagnostics, err)
+			failures = append(failures, err)
+		}
+	}
+	if err := application.save(); err != nil {
+		return err
+	}
+	return errors.Join(failures...)
+}
+
+func (application *app) run(command string, args []string, flags map[string]string) error {
+	if name := flags["vault"]; name != "" {
+		if _, err := application.configuration.Vault(name); err != nil {
+			return err
+		}
+	}
+	if command == "list" {
+		if !application.hasInventory {
+			working, _ := application.configuration.Vault("")
+			if _, err := os.Stat(working.Path); os.IsNotExist(err) {
+				if err := store.Prepare(working); err != nil {
+					return err
+				}
+			}
+			if err := application.refresh(application.names()...); err != nil {
+				fmt.Fprintln(application.diagnostics, "partial inventory; unavailable vaults remain unknown")
+			}
+		}
+		return application.list(args, flags)
+	}
+	if command == "refresh" {
+		names := application.names()
+		if flags["vault"] != "" {
+			names = []string{flags["vault"]}
+		}
+		return application.refresh(names...)
+	}
+	if command == "sync" {
+		return application.sync(args[0], args[1], flags)
+	}
+	if command == "verify" {
+		return application.verify(args, flags)
+	}
+	if len(args) > 0 && command != "pull" {
+		if err := store.ValidateRepo(args[0]); err != nil {
+			return usageError{err.Error()}
+		}
+	}
+	switch command {
+	case "path":
+		vault, err := application.configuration.Vault(flags["vault"])
 		if err != nil {
-			return store.Vault{}, err
+			return err
 		}
-		if v.Remote() {
-			return store.Vault{}, fmt.Errorf("vault %s is remote; this needs a local or mounted vault", name)
+		model, err := store.Inspect(vault, args[0])
+		if err != nil {
+			return err
 		}
-		return v, nil
+		path, err := store.Snapshot(model, flags["rev"])
+		if err != nil {
+			return err
+		}
+		if vault.Remote() {
+			path = vault.Host + ":" + path
+		}
+		fmt.Fprintln(application.output, path)
+		return nil
+	case "pull":
+		return application.pull(args, flags)
+	case "get":
+		return application.get(args[0], flags)
+	case "cp", "mv", "evict":
+		sourceName, destinationName := application.configuration.DefaultVault, args[1]
+		if command != "evict" {
+			sourceName, destinationName = args[1], args[2]
+		}
+		sourceVault, err := application.configuration.Vault(sourceName)
+		if err != nil {
+			return err
+		}
+		destinationVault, err := application.configuration.Vault(destinationName)
+		if err != nil {
+			return err
+		}
+		move := command != "cp"
+		if move {
+			if err := application.confirm(flags, fmt.Sprintf("verify %s in %s, then remove it from %s?", args[0], destinationName, sourceName)); err != nil {
+				return err
+			}
+		}
+		if command == "evict" {
+			model, err := store.Inspect(sourceVault, args[0])
+			if err != nil {
+				return err
+			}
+			if model != nil && model.Reference {
+				if err := store.Delete(sourceVault, args[0], nil); err != nil {
+					return err
+				}
+				return application.refresh(sourceName)
+			}
+		}
+		err = store.Transfer(args[0], sourceVault, destinationVault, move, flags["force"] != "")
+		refreshErr := application.refresh(sourceName, destinationName)
+		if err != nil {
+			return err
+		}
+		return refreshErr
+	case "rm":
+		return application.remove(args[0], args[1], flags)
 	}
-	for _, n := range sortedVaultNames() {
-		if !cfg.Vaults[n].Remote() {
-			return cfg.Vaults[n], nil
-		}
-	}
-	return store.Vault{}, fmt.Errorf("no local or mounted vault configured. Run: ark vault ls")
+	return usageError{"unsupported command"}
 }
 
-// firstLocalVault names a vault this machine can open, for hints.
-func firstLocalVault() string {
-	for _, n := range sortedVaultNames() {
-		if !cfg.Vaults[n].Remote() {
-			return n
-		}
-	}
-	return "<local>"
-}
-
-func resolveSourceRepo(from, repo string) (store.Model, error) {
-	slug := store.Slug(repo)
-	if from == "" {
-		return resolveSource(repo)
-	}
-	v, err := cfg.Vault(from)
+func (application *app) pull(args []string, flags map[string]string) error {
+	repo, err := source.Parse(args[0])
 	if err != nil {
-		return store.Model{}, err
+		return usageError{err.Error()}
 	}
-	if v.Remote() {
-		out, _ := sshRun(v.Host, fmt.Sprintf("test -d %q && echo yes", v.ModelDir(slug)))
-		if strings.TrimSpace(out) != "yes" {
-			return store.Model{}, fmt.Errorf("%s not found in vault %s", repo, v.Name)
+	vault, err := application.configuration.Vault(args[1])
+	if err != nil {
+		return err
+	}
+	model, err := store.Inspect(vault, repo)
+	if err != nil {
+		return err
+	}
+	if model != nil {
+		if flags["rev"] != "" {
+			if _, err := store.Snapshot(model, flags["rev"]); err != nil {
+				return fmt.Errorf("model already exists with other revisions; updates are not supported in V1")
+			}
 		}
-		return store.Model{Vault: v, Slug: slug, Dir: v.ModelDir(slug)}, nil
+		fmt.Fprintln(application.diagnostics, "model already cached; no update or download performed")
+		return application.refresh(vault.Name)
 	}
-	d := v.ModelDir(slug)
-	if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
-		return store.Model{}, fmt.Errorf("%s not found in vault %s", repo, v.Name)
+	if err := store.Prepare(vault); err != nil {
+		return err
 	}
-	m, _ := store.ReadMeta(d)
-	return store.Model{Vault: v, Slug: slug, Dir: d, Meta: m}, nil
+	need, err := source.DownloadBytes(repo, flags["rev"], vault)
+	if err != nil {
+		return err
+	}
+	total, free, err := store.Space(vault)
+	if err != nil {
+		return err
+	}
+	if err := store.RoomOK(total, free, need, flags["force"] != ""); err != nil {
+		return err
+	}
+	if err := source.Fetch(repo, flags["rev"], vault); err != nil {
+		application.refresh(vault.Name)
+		return err
+	}
+	if _, err := store.EnsureManifest(vault, repo); err != nil {
+		application.refresh(vault.Name)
+		return err
+	}
+	return application.refresh(vault.Name)
 }
 
-func errHint(err error) string {
-	if err == nil {
-		return "checksum mismatch"
+func (application *app) get(repo string, flags map[string]string) error {
+	destination, _ := application.configuration.Vault("")
+	model, err := store.Inspect(destination, repo)
+	if err != nil {
+		return err
 	}
-	return err.Error()
+	if model != nil && !model.Reference {
+		fmt.Fprintln(application.diagnostics, "model already present in", destination.Name)
+		return application.refresh(destination.Name)
+	}
+	names := application.names()
+	sort.SliceStable(names, func(left, right int) bool {
+		return !application.configuration.Vaults[names[left]].Remote() && application.configuration.Vaults[names[right]].Remote()
+	})
+	var selected *store.Model
+	candidates := []store.Vault{}
+	for _, name := range names {
+		if name == destination.Name {
+			continue
+		}
+		vault := application.configuration.Vaults[name]
+		candidate, err := store.Inspect(vault, repo)
+		if err != nil {
+			fmt.Fprintln(application.diagnostics, err)
+			continue
+		}
+		if candidate == nil {
+			continue
+		}
+		if selected != nil && !store.SameArtifacts(selected, candidate) {
+			return fmt.Errorf("different artifacts are available; choose one with ark cp %s <source> %s", repo, destination.Name)
+		}
+		selected = candidate
+		candidates = append(candidates, vault)
+	}
+	if len(candidates) == 0 {
+		return fmt.Errorf("no available copy of %s; mount its vault or run ark refresh", repo)
+	}
+	var failures []error
+	for _, vault := range candidates {
+		if err := store.Transfer(repo, vault, destination, false, flags["force"] != ""); err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		return application.refresh(vault.Name, destination.Name)
+	}
+	return errors.Join(failures...)
 }
 
-func trunc(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
+func (application *app) remove(repo, name string, flags map[string]string) error {
+	vault, err := application.configuration.Vault(name)
+	if err != nil {
+		return err
 	}
-	return s
+	model, err := store.Inspect(vault, repo)
+	if err != nil {
+		return err
+	}
+	if model == nil {
+		return fmt.Errorf("model not present in %s", name)
+	}
+	var meta *store.Meta
+	if !model.Reference && flags["force"] == "" {
+		meta, err = store.EnsureManifest(vault, repo)
+		if err != nil {
+			return err
+		}
+		protected := false
+		for _, otherName := range application.names() {
+			if otherName == name {
+				continue
+			}
+			other := application.configuration.Vaults[otherName]
+			copy, inspectErr := store.Inspect(other, repo)
+			if inspectErr != nil || copy == nil || copy.Reference || copy.Identity == model.Identity {
+				continue
+			}
+			actual, hashErr := store.Manifest(other, repo)
+			if hashErr == nil && actual.Digest == meta.Digest && store.Verify(other, repo) == nil {
+				protected = true
+				break
+			}
+		}
+		if !protected {
+			return fmt.Errorf("last known independent copy; use ark evict %s <destination>, or --force to delete it deliberately", repo)
+		}
+	}
+	if err := application.confirm(flags, fmt.Sprintf("delete %s from %s?", repo, name)); err != nil {
+		return err
+	}
+	if err := store.Delete(vault, repo, meta); err != nil {
+		return err
+	}
+	return application.refresh(name)
 }
 
-var _ = bufio.NewReader
-var _ = strconv.Itoa
+func (application *app) sync(sourceName, destinationName string, flags map[string]string) error {
+	sourceVault, err := application.configuration.Vault(sourceName)
+	if err != nil {
+		return err
+	}
+	destinationVault, err := application.configuration.Vault(destinationName)
+	if err != nil {
+		return err
+	}
+	if sourceName == destinationName {
+		return fmt.Errorf("source and destination must differ")
+	}
+	models, err := store.Scan(sourceVault)
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for _, model := range models {
+		if err := store.Transfer(model.Repo, sourceVault, destinationVault, false, flags["force"] != ""); err != nil {
+			fmt.Fprintln(application.diagnostics, err)
+			failures = append(failures, err)
+		}
+	}
+	if err := application.refresh(sourceName, destinationName); err != nil {
+		failures = append(failures, err)
+	}
+	return errors.Join(failures...)
+}
+
+func (application *app) verify(args []string, flags map[string]string) error {
+	if len(args) > 0 {
+		if err := store.ValidateRepo(args[0]); err != nil {
+			return usageError{err.Error()}
+		}
+	}
+	names := application.names()
+	if flags["vault"] != "" {
+		names = []string{flags["vault"]}
+	}
+	var failures []error
+	checked := 0
+	for _, name := range names {
+		vault := application.configuration.Vaults[name]
+		models, err := store.Scan(vault)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		corrupt := []string{}
+		for _, model := range models {
+			if len(args) > 0 && model.Repo != args[0] {
+				continue
+			}
+			checked++
+			if err := store.Verify(vault, model.Repo); err != nil {
+				failures = append(failures, err)
+				corrupt = append(corrupt, model.Repo)
+			} else {
+				fmt.Fprintf(application.diagnostics, "verified %s in %s\n", model.Repo, name)
+			}
+		}
+		if err := application.inventory.Refresh(vault); err != nil {
+			failures = append(failures, err)
+		}
+		for _, repo := range corrupt {
+			if location := application.inventory.Models[repo][name]; location != nil {
+				location.State = "corrupt"
+			}
+		}
+	}
+	if checked == 0 {
+		failures = append(failures, fmt.Errorf("no matching copies were verified"))
+	}
+	if err := application.save(); err != nil {
+		failures = append(failures, err)
+	}
+	return errors.Join(failures...)
+}
+
+func (application *app) list(args []string, flags map[string]string) error {
+	if len(args) > 0 {
+		if err := store.ValidateRepo(args[0]); err != nil {
+			return usageError{err.Error()}
+		}
+	}
+	names := application.names()
+	if flags["vault"] != "" {
+		names = []string{flags["vault"]}
+	}
+	filtered := &store.Inventory{Models: map[string]map[string]*store.Location{}, Vaults: map[string]*store.VaultState{}}
+	for _, name := range names {
+		if state := application.inventory.Vaults[name]; state != nil {
+			filtered.Vaults[name] = state
+		}
+	}
+	for repo, copies := range application.inventory.Models {
+		if len(args) > 0 && repo != args[0] {
+			continue
+		}
+		for _, name := range names {
+			if location := copies[name]; location != nil {
+				if filtered.Models[repo] == nil {
+					filtered.Models[repo] = map[string]*store.Location{}
+				}
+				filtered.Models[repo][name] = location
+			}
+		}
+	}
+	if flags["json"] != "" {
+		encoder := json.NewEncoder(application.output)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(filtered)
+	}
+	writer := tabwriter.NewWriter(application.output, 0, 4, 2, ' ', 0)
+	fmt.Fprint(writer, "MODEL\tREVISION\tSIZE")
+	for _, name := range names {
+		fmt.Fprintf(writer, "\t%s", name)
+	}
+	fmt.Fprintln(writer)
+	repos := []string{}
+	for repo := range filtered.Models {
+		repos = append(repos, repo)
+	}
+	sort.Strings(repos)
+	for _, repo := range repos {
+		revisions := map[string]int64{}
+		for _, location := range filtered.Models[repo] {
+			for _, revision := range location.Model.Revisions {
+				revisions[revision.Revision] = revision.SizeBytes
+			}
+		}
+		commits := []string{}
+		for commit := range revisions {
+			commits = append(commits, commit)
+		}
+		sort.Strings(commits)
+		for _, commit := range commits {
+			fmt.Fprintf(writer, "%s\t%.12s\t%s", repo, commit, humanBytes(revisions[commit]))
+			for _, name := range names {
+				state := "-"
+				if location := filtered.Models[repo][name]; location != nil {
+					for _, revision := range location.Model.Revisions {
+						if revision.Revision == commit {
+							state = location.State
+							break
+						}
+					}
+				}
+				fmt.Fprintf(writer, "\t%s", state)
+			}
+			fmt.Fprintln(writer)
+		}
+	}
+	if err := writer.Flush(); err != nil {
+		return err
+	}
+	fmt.Fprintln(application.output, "\npresent = observed; verified = last checksum check; reference = no independent copy; unknown = unavailable; missing = absent; corrupt = failed check")
+	for _, name := range names {
+		vault := application.configuration.Vaults[name]
+		total, free, err := store.Space(vault)
+		if err != nil {
+			fmt.Fprintf(application.output, "%s: space unavailable\n", name)
+		} else {
+			fmt.Fprintf(application.output, "%s: %s free / %s total\n", name, humanBytes(free), humanBytes(total))
+		}
+	}
+	for _, repo := range repos {
+		independent := map[string]bool{}
+		working := false
+		for name, location := range application.inventory.Models[repo] {
+			if location.State == "missing" || location.State == "unknown" || location.State == "corrupt" {
+				continue
+			}
+			if !location.Model.Reference {
+				independent[location.Model.Identity] = true
+			}
+			if name == application.configuration.DefaultVault {
+				working = true
+			}
+		}
+		if len(independent) < 2 {
+			fmt.Fprintf(application.output, "%s: no other known independent copy\n", repo)
+		}
+		if !working {
+			fmt.Fprintf(application.output, "%s: not in %s; use ark get\n", repo, application.configuration.DefaultVault)
+		}
+	}
+	return nil
+}
+
+func (application *app) vault(args []string, flags map[string]string) error {
+	switch args[0] {
+	case "ls":
+		if len(args) != 1 || flags["yes"] != "" {
+			return usageError{"usage: ark vault ls"}
+		}
+		for _, name := range application.names() {
+			vault := application.configuration.Vaults[name]
+			fmt.Fprintf(application.output, "%s\t%s\t%s\n", name, vault.Type, vault.URL())
+		}
+		return nil
+	case "add":
+		if len(args) != 3 || flags["yes"] != "" {
+			return usageError{"usage: ark vault add <name> <location>"}
+		}
+		if _, exists := application.configuration.Vaults[args[1]]; exists {
+			return fmt.Errorf("vault %s already exists; remove its configuration before replacing it", args[1])
+		}
+		vault, err := config.ParseLocation(args[1], args[2])
+		if err != nil {
+			return usageError{err.Error()}
+		}
+		application.configuration.Vaults[args[1]] = vault
+		return application.configuration.Save()
+	case "rm":
+		if len(args) != 2 {
+			return usageError{"usage: ark vault rm <name> [--yes]"}
+		}
+		if args[1] == application.configuration.DefaultVault {
+			return fmt.Errorf("cannot remove the default working vault; change default_vault first")
+		}
+		if _, err := application.configuration.Vault(args[1]); err != nil {
+			return err
+		}
+		if err := application.confirm(flags, "remove vault configuration only? Files stay on disk."); err != nil {
+			return err
+		}
+		delete(application.configuration.Vaults, args[1])
+		if err := application.configuration.Save(); err != nil {
+			return err
+		}
+		inventory, _, err := store.ReadInventory(config.InventoryPath())
+		if err != nil {
+			return err
+		}
+		delete(inventory.Vaults, args[1])
+		for _, copies := range inventory.Models {
+			delete(copies, args[1])
+		}
+		return store.AtomicJSON(config.InventoryPath(), inventory)
+	}
+	return usageError{"unknown vault command"}
+}
+
+func humanBytes(size int64) string {
+	if size < 1024 {
+		return strconv.FormatInt(size, 10) + " B"
+	}
+	amount := float64(size)
+	for _, unit := range []string{"KiB", "MiB", "GiB", "TiB", "PiB"} {
+		amount /= 1024
+		if amount < 1024 || unit == "PiB" {
+			return fmt.Sprintf("%.1f %s", amount, unit)
+		}
+	}
+	return ""
+}

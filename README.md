@@ -1,228 +1,228 @@
 # Arkadian — `ark`
 
-**Tired of cleaning your disk?** Arkadian keeps Hugging Face models in **vaults**.
-A single-binary CLI (Go) that moves LLM models across storage tiers: a fast **local
-tier** (NVMe on your GPU box) and one or more **cold vaults** (a network NAS, a mounted
-drive, another machine). `ark list` shows the size of every model, the size of every
-vault, and the free space left. Download once, verify, serve offline — even if
-Hugging Face itself disappears.
+**Running out of space for your models?**
 
-> Why "Arkadian"? Ark, the vessel, and Arcadia, the place that stays safe. If the
-> model-zoo floods (CDN outage, repo takedowns, deprecations), you want your own
-> home for them: curated, checksummed, reachable without internet.
->
-> The project is Arkadian. The command you type stays `ark`, and so do its names:
-> `ARK_CONFIG`, `~/.arkadian/config.json`, and `.arkmeta.json`.
+> Know which models you have, exactly which artifact each one is, where verified
+> copies exist, and move them safely between your storage tiers.
 
-## The model
+Arkadian is a small Go CLI for Hugging Face models. It finds your existing HF
+cache, tracks copies across named vaults, and verifies a destination before
+freeing the source. It keeps models in native HF caches. No daemon, database,
+telemetry, or model format conversion.
 
-```
-                 ark download Qwen/Qwen3-32B --to spark
-                 │ (source: hf / hf_transfer / obscura / modelscope)
-                 ▼
-   ┌─────────────────────┐    ark mv --from spark --to nas    ┌──────────────────────────┐
-   │ vault: spark (local) │ ─────────────────────────────►   │ vault: nas (remote, ssh)  │
-   │ ~/ark/spark/models/  │ ◄─────────────────────────────    │ /volume1/ark/models/       │
-   │  Qwen--Qwen3-32B/    │    ark mv --from nas --to spark   │  Qwen--Qwen3-32B/          │
-   └─────────┬───────────┘    ark mv ... --link = no bytes    └──────────────────────────┘
-             │ ark link
-             ▼
-   ~/ark/models/Qwen/Qwen3-32B  ──symlink──►  served offline (HF_HUB_OFFLINE=1)
-```
+The implementation and validation tasks are in [PLAN.md](PLAN.md). The initial
+website follows restructuring validation. GitHub release and Homebrew are the
+final V1 steps. Nothing is published yet.
 
-- **Layout = HF `--local-dir` layout**: a vault dir *is* a model path you can hand
-  straight to vLLM/transformers. No proprietary format, no conversion.
-- **Vault kinds**: `local` (a directory), `samba` (a mounted path, CIFS/SMB or NFS),
-  or `remote` (`user@host`, rsync-over-ssh). Multiple vaults supported — NVMe, NAS,
-  USB dock, second machine.
-- **Sources**: Hugging Face (`hf`, `hf_transfer`, `obscura`) and ModelScope
-  (`--source modelscope`). A vault does not have a source type: each model keeps the
-  source that fetched it in its own `.arkmeta.json`.
-- **One verb moves models**: `ark mv <repo> --from A --to B`. Any end works: local,
-  samba, or remote. Remote to remote streams through this machine with rsync and
-  needs no local disk. `ark rm <repo>` is the other half: it frees the space.
-- **Two kinds of symlink**. `ark link` makes a link for *serving*: a path in
-  `~/ark/models` that points at the vault copy. `ark mv --link` makes a link
-  inside a *vault*: the model shows up there and costs no space, and the source
-  vault keeps the bytes. Both need a path the machine can open, so they work with
-  local and mounted vaults, not with an ssh vault. A link is not a backup: the
-  bytes live in one place. `ark unlink` removes a serving link.
-- **Manifests**: every download stores a sha256 manifest (`.arkmeta.json`), so
-  nothing in a vault is unverifiable. `ark verify`
-  detects NAS bit-rot.
+## Install and requirements
 
-## Install
+Build from source with Go 1.27.1 or later:
 
 ```bash
-# Go toolchain (works today, no other dependencies):
-go install github.com/henry2man/arkadian/cmd/ark@latest
-
-# Or build from source:
-git clone https://github.com/henry2man/arkadian && cd arkadian && go build -o bin/ark ./cmd/ark
-
-# Homebrew, planned (not published yet, the repo is private):
-# brew tap henry2man/arkadian && brew install --cask arkadian   # installs the ark command
+brew install go
+go build -o bin/ark ./cmd/ark
+./bin/ark version
 ```
 
-Requirements: Go ≥ 1.27 to build. Runtime needs: `rsync` and `ssh` (only for remote
-vaults), and one download source in `PATH`: `hf` from `pip install huggingface_hub[cli]`
-(or `hf_transfer`, `obscura`, `modelscope`).
+Runtime tools:
 
-## First run
+- `hf` with `cache ls --revisions --format json`, `cache rm`, and download dry-run
+  support. The implementation is tested with HF CLI 1.5.0.
+- Python 3.9 or later for the small filesystem and checksum helper. It uses only
+  the Python standard library.
+- `rsync` for transfers. `ssh` for remote vaults, with keys and BatchMode access.
 
-On first use `ark` writes `~/.arkadian/config.json` with one local vault: `spark`
-at `~/ark/spark`. `ark` never guesses a host, so your cold vault is yours to name:
-`ark vault add nas user@nas:/volume1/ark`. After that the file reads:
+Install and authenticate HF where downloads run. Install Python on each host
+whose cache Arkadian inspects. No Go installation is needed to run the binary.
 
-```json
-{
-  "vaults": {
-    "spark": { "kind": "local",  "path": "~/ark/spark" },
-    "nas":   { "kind": "remote", "host": "user@nas", "path": "/volume1/ark" }
-  },
-  "default_to": "spark",
-  "rsync_flags": "-a --inplace --partial"
-}
+Homebrew publication is planned, not available yet. The package name will be
+`arkadian`; the command stays `ark`.
+
+## Use existing models immediately
+
+```bash
+ark list
+ark vault add nas user@nas:/data/models
+ark evict Qwen/Qwen3-8B nas --yes
+ark get Qwen/Qwen3-8B
+vllm serve "$(ark path Qwen/Qwen3-8B)"
 ```
 
-Adapt it by hand or with `ark vault add|rm`. Override the location with `ARK_CONFIG`.
-Set `"source": "modelscope"` to make ModelScope the default download source.
+On first use, Arkadian registers `hfcache` at the HF cache location. It respects
+`HF_HUB_CACHE`, the legacy `HUGGINGFACE_HUB_CACHE`, `HF_HOME`, and `XDG_CACHE_HOME`.
+The fallback is `~/.cache/huggingface/hub`.
 
-### Network NAS setup (one-time)
+The first list discovers existing models. It does not move, duplicate, or hash
+all weights. Later lists read the saved inventory. Use `ark refresh` after
+external tools change a cache or after reconnecting a disk.
 
-1. In the NAS admin page, enable the SSH service.
-2. `ssh-copy-id user@nas` (ark uses BatchMode ssh; no interactive passwords).
-3. The first `mv`/`download` creates `<vault-root>/models` automatically.
+## Vaults and responsibilities
 
-SMB/CIFS is *not* required (rsync-over-ssh is faster and preserves HF hardlinks).
-You can still point a `local`-kind vault at a mounted CIFS path if you prefer —
-`rsync` handles it, just without hardlink dedup.
+A vault has a name, `type: huggingface`, and a cache root. Its location is a local
+path, a mounted path, `user@host:/path`, or `ssh://user@host/path`.
+
+```bash
+ark vault add usb /mnt/usb/hf-cache
+ark vault add nas /mnt/nas/hf-cache
+ark vault add archive ssh://user@archive/data/hf-cache
+ark vault ls
+```
+
+Mount SMB/NFS or external disks with the operating system. Configure SSH keys,
+ports, and aliases outside Arkadian. An `smb://` or `nfs://` URL is not a mount.
+Arkadian reports missing tools and connections; it does not configure them.
+
+HF downloads and manages caches. Rsync transports bytes. Arkadian supplies the
+inventory, artifact conflict checks, and verification before deletion.
+User-created links remain the job of `ln`. A remote SSH path is not a local path
+that a runtime can open. Mount it or copy the model with `get`.
 
 ## Commands
 
-`<arg>` is required. `[--flag V]` is optional. Every command answers `--help`.
+Use exact HF repository IDs. Short names are not aliases. Some HF repositories
+have a one-component identifier; use the identifier that HF itself stores.
 
-| Command | What it does |
+| Command | Purpose |
 |---|---|
-| `ark list` | Size per model, size per vault, free disk space, and the copies that are at risk |
-| `ark download <repo> --to V [--rev R] [--source S]` | Fetch from HF or ModelScope into staging, then into the vault. The sha256 manifest is always stored |
-| `ark load <repo> --from V --link\|--copy [--force] [--yes]` | Make a model available here. `--link` = no bytes; `--copy` = real bytes, with a room check first |
-| `ark mv <repo> --from A --to B [--link] [--yes]` | The one move verb. Copies, then deletes the source. `--link` = a symlink in B, A keeps the bytes, no space used |
-| `ark rm <repo> [--vault V] [--yes]` | Delete a model to free space. Asks first, `--yes` skips it |
-| `ark path <repo> [--vault V]` | Path of one model, local or `host:path` — what vLLM needs |
-| `ark link <repo> [--dir DIR]` | Symlink a model → `~/ark/models/<org>/<name>`, then print the two exports to serve it offline |
-| `ark unlink <repo> [--dir DIR]` | Remove that symlink. Refuses a real directory |
-| `ark verify [repo]` | sha256 check against the manifest. Bit-rot sweep |
-| `ark info <repo>` | Stored metadata as JSON |
-| `ark vault ls` | Name, kind, and path of every vault |
-| `ark vault add <name> <location>` | One location, one word: `/data/ark`, `~/ark`, `user@host:/path`, or `ssh://user@host/path` |
-| `ark vault add <name> local <path>` | The two-word spelling of a directory on this machine |
-| `ark vault add <name> samba <path>` | The two-word spelling of a mounted CIFS/SMB/NFS path |
-| `ark vault add <name> <user@host> <path>` | The two-word spelling of a remote machine, rsync over ssh |
-| `ark vault rm <name> [--yes]` | Drop a vault from the config. Never deletes files |
-| `ark version` | Version, one-line about, and the repo link |
+| `ark list [model] [--vault V] [--json]` | What models exist, which artifacts, and where |
+| `ark refresh [--vault V]` | Reconcile inventory without copying weights |
+| `ark pull hf://org/model <destination> [--rev R] [--force]` | Run HF download at the named destination |
+| `ark cp <model> <source> <destination> [--force]` | Create and verify an independent copy |
+| `ark mv <model> <source> <destination> [--yes] [--force]` | Copy, verify, then delete source |
+| `ark get <model> [--force]` | Find an available copy and bring it to the working cache |
+| `ark evict <model> <destination> [--yes] [--force]` | Keep a verified destination copy and free the working cache |
+| `ark rm <model> <vault> [--yes] [--force]` | Remove one copy, with last-copy protection |
+| `ark sync <source> <destination> [--force]` | Add source models; preserve destination history |
+| `ark verify [model] [--vault V]` | Verify files against offline manifests |
+| `ark path <model> [--vault V] [--rev R]` | Print a snapshot path for other tools |
+| `ark vault add <name> <location>` | Register a vault with the HF type |
+| `ark vault ls` | Show names, types, and locations |
+| `ark vault rm <name> [--yes]` | Remove configuration; never delete weights |
+| `ark version` | Show the build version |
 
-Eleven commands, no aliases, no second way to do the same thing.
+Every command supports `--help`. Transfer endpoints are positional, in source
+then destination order. No `--from` or `--to`. `get` and `evict` use the configured
+default working vault, initially `hfcache`.
 
-### Conventions
+`--yes` skips confirmation only. `--force` can override the 90% space guard.
+On `rm`, it also explicitly permits deleting the last copy. Neither flag disables
+transfer verification or allows conflict overwrites.
 
-- Flags are long and spelled out: `--to nas`. No short flags, except `-h` and `-v`.
-- A flag with no value is a switch: `--link`, `--copy`, `--yes`, `--force`.
-- Destructive commands ask. `--yes` answers yes for scripts.
-- The vault is named, never guessed: a missing `--from` or `--to` stops and says
-  `Run: ark vault ls`.
-- Errors go to stderr and exit 1. Bad usage exits 2. `--help` exits 0.
-- A vault location is a path, `host:/path`, or `ssh://user@host/path`, in
-  `ark vault add` and in `--from` / `--to`. `smb://` and `nfs://` are refused:
-  ark reads a mounted path, it does not speak those protocols.
-- A removed command prints the one that replaces it. `ark promote` says to run
-  `ark load`. Nothing fails with a shrug.
+Diagnostics go to stderr. `path` prints only its result to stdout. `list --json`
+returns the filtered inventory. Exit codes: 0 success, 1 failure, 2 bad usage.
 
-### Example flow
+`download`, `load`, `link`, `unlink`, and `info` are retired. Their errors show
+replacements. Use `get` for a real local copy, `ln` for links, and `list --json`
+for structured model information.
 
-```bash
-ark vault add spark ~/ark/spark                         # fast disk, where you work
-ark vault add nas   user@nas:/volume1/ark               # the cold copy, over ssh
-ark download Qwen/Qwen3-8B --to spark                   # HF -> local vault
-ark mv Qwen/Qwen3-8B --from spark --to nas              # cold copy on the NAS, free the disk
-ark list                                                # sizes per vault + free space
-ark load Qwen/Qwen3-8B --from nas --link                # use it here, copy nothing
-ark link Qwen/Qwen3-8B                                  # symlink + the export lines
-export HF_HUB_OFFLINE=1
-vllm serve $(ark path Qwen/Qwen3-8B) ...                 # fully offline
-ark verify                                              # monthly cron: bit-rot sweep
-ark rm Qwen/Qwen3-8B --vault spark                      # done with it: free the space
+## Inventory and integrity
+
+```text
+MODEL           REVISION      SIZE     hfcache  usb       nas
+Qwen/Qwen3-8B   abc123...      15 GiB   present  -         verified
+org/other       def456...      30 GiB   missing  unknown   verified
 ```
 
-## How this code is written
+The display includes a state legend, vault free space, and copy-risk hints.
+A reference is not an independent copy. Sizes per revision can share HF blobs;
+do not sum revision sizes to estimate physical cache use.
 
-This repo uses [Ponytail](https://github.com/DietrichGebert/ponytail). It is a skill
-for AI agents, pinned for this project in `.pi/settings.json`. One rule: write the
-least code that works. Before new code, stop at the first rung that holds.
+- `config.json` stores vaults and the default working vault.
+- `models.json` stores the last observed artifacts and locations, keyed by repo.
+- `.arkmeta.json` at each cached repository root stores file hashes per revision.
 
-1. Do not build it. Someone asked; that is not a reason.
-2. Reuse what lives in `internal/` already.
-3. Use the Go standard library.
-4. Use the platform: `rsync`, `ssh`, hardlinks, `df`.
-5. Write the minimum that works, in the fewest files.
+Both user JSON files live in `~/.arkadian`. `ARK_CONFIG` changes the config path;
+the inventory is stored beside it. Metadata is written atomically. One Arkadian
+operation at a time uses each configuration.
 
-Kept honest by `gofmt`, `go vet`, and a real run of the command you changed.
-Deliberate shortcuts carry a `// ponytail:` comment that names the ceiling and the
-way out. The binary stays free of external Go modules.
+Refresh keeps disconnected vaults as unknown. It marks copies missing only after
+a complete successful scan. Verified means the last recorded checksum check;
+refresh invalidates it when file metadata changes. Full verify checks the bytes.
 
-## Design notes
+A cached snapshot can be partial. Presence or a byte manifest does not prove
+that all files needed by a runtime are available. A first manifest establishes
+the bytes present, not their original Hub authenticity.
 
-- **Staging**: downloads land in `<vault-root>/../staging`, then hardlink-move into
-  the vault — an interrupted download never pollutes a vault.
-- **Transfers**: `rsync -a --inplace --partial` → resumable, checksum-safe, and HF's
-  content-addressed cache never re-copies an unchanged blob.
-- **Sources**: auto-detects `hf` → `hf_transfer` → `obscura`. ModelScope is opt-in:
-  `--source modelscope`. The seam is `internal/source`, so a torrent or mirror
-  backend is one small file.
-- **Integrity**: `.arkmeta.json` (repo, revision, sha256s, size). `ark verify` exits
-  non-zero on mismatch — wire it into cron/healthchecks.
+Transfers preserve native HF repository contents and internal links. Copies do
+not hardlink weights across vaults. Failed transfers retain destination staging
+under `.locks/ark-staging`, so a retry can resume. Publication follows checksum
+verification. Moves recheck the source before cache deletion.
 
-## Honest limitations
+`verify` needs an existing manifest. Pull and copy establish one. Verification
+then works offline, even if the source registry is unavailable.
 
-- Arkadian is for a **curated** lifeboat, not a full mirror. HF's *total* archive
-  is petabytes.
-- `download` writes to a **local** vault first (download sources cannot write over
-  ssh), then ships. Disk on the staging box must fit the largest single model.
-- Remote `list` needs ssh reachability; degraded vaults warn rather than fail.
-
-## Releases
-
-Nothing is published yet. The repo is private, so the release pipeline is ready
-but idle.
-
-- `ci.yml` runs on every push and pull request: `gofmt`, `go vet`, `go test`,
-  `go build`. This works on a private repo.
-- `release.yml` uses [GoReleaser](https://goreleaser.com). It starts by hand for
-  now (Actions → Release → Run workflow). It builds linux/darwin × amd64/arm64
-  and opens the GitHub Release.
-- The Homebrew block in `.goreleaser.yaml` is commented out. Homebrew needs a
-  public repo and a second repo as the tap.
-
-Try the build locally. Nothing leaves your machine:
+## Archiving and synchronization
 
 ```bash
-goreleaser release --snapshot --clean --skip=publish   # writes dist/ only
+ark pull hf://Qwen/Qwen3-8B nas
+ark sync usb nas
 ```
 
-To publish later: make the repo public, uncomment the two marked blocks, create
-the empty tap repo `henry2man/homebrew-arkadian`, add a token for it as the
-`HOMEBREW_TAP_GITHUB_TOKEN` secret, and set Actions → General → Workflow
-permissions to *Read and write*. Then a tag publishes: `git tag v0.1.0 &&
-git push origin v0.1.0`. The version comes from the tag; `ark version` prints it.
+Pull into an SSH vault runs HF on that host. It does not store weights on this
+machine first. That host must have HF, Python, permissions, and authentication.
+
+Sync is additive and unidirectional. It adds USB models to NAS, retains NAS-only
+history, and never returns that history to USB. Different artifact sets are
+conflicts, not automatic updates. Failures return nonzero while independent
+models can finish.
+
+SSH-to-SSH transfers run rsync at the source host. That host must be able to
+authenticate to the destination. There is no implicit local staging fallback.
+
+V1 does not update models or add revisions to an existing model. It recognizes
+and preserves multiple revisions that were already in a cache. If `get` finds
+different artifacts, choose a source with `cp`. Path selects an explicit
+revision, then a cached `main`, then the only revision; otherwise use `--rev`.
+
+Old Arkadian `models/<slug>` vaults are not native HF caches. Register the real
+HF cache; do not point the new backend at the old layout.
+
+## Development and release
+
+```bash
+gofmt -w cmd internal
+go vet ./...
+go test ./...
+go build -o bin/ark ./cmd/ark
+./bin/ark version
+```
+
+Tests use small native caches and the installed HF/Python/rsync tools. Remote
+tests use controlled SSH substitutes. They do not require a real NAS or network
+downloads. The core uses the Go standard library. Use the smallest change that
+works and retain checks for data safety.
+
+Release remains idle until V1 validation and the initial website are ready.
+GoReleaser builds linux/darwin amd64/arm64. Versions come from tags; change logs
+come from commits. Test packaging without publishing:
+
+```bash
+goreleaser release --snapshot --clean --skip=publish
+```
+
+At the final release phase, confirm repository visibility, create the tap
+`henry2man/homebrew-arkadian`, configure `HOMEBREW_TAP_GITHUB_TOKEN`, validate the
+generated package, and enable the commented Homebrew block and release trigger.
+Test a clean install before calling the release complete. PLAN.md tracks these
+steps and the initial website.
+
+## Future ideas
+
+- A TUI that retains the CLI for scripts and agents.
+- Model aliases, updates, and explicit revision management.
+- ModelScope and other providers, driven by contributions.
+- Import and discovery outside HF caches.
+- OCI/Ollama sources and S3-compatible storage.
+- Replica policies, jobs/resume, and garbage collection.
+- Advanced hash caching and a diagnostic command.
+- Additional website languages after the initial page.
 
 ## Thanks
 
-- [Ponytail](https://github.com/DietrichGebert/ponytail), the lazy senior dev. Most
-  of this code is code that was never written, and the parts that exist are shorter
-  because he looked at them.
-- [pi](https://github.com/earendil-works/pi), the coding agent this repo was built
-  with. The Go tooling, the vault tests, and the docs all went through it.
+- [Ponytail](https://github.com/DietrichGebert/ponytail): the simplest solution
+  that works, with the platform and standard library first.
+- [pi](https://github.com/earendil-works/pi): the agent used for the first build.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

@@ -1,127 +1,163 @@
-// Path of the config: ~/.arkadian/config.json (ARK_CONFIG overrides the path).
 package config
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/henry2man/arkadian/internal/store"
 )
 
-const (
-	defaultLocalRoot  = "~/ark/spark"
-	defaultRsyncFlags = "-a --inplace --partial"
-)
-
-// Config is the ark CLI configuration.
 type Config struct {
-	Vaults     map[string]store.Vault `json:"vaults"`           // name -> vault
-	DefaultTo  string                 `json:"default_to"`       // download destination vault
-	Source     string                 `json:"source,omitempty"` // "" = auto-detect
-	RsyncFlags string                 `json:"rsync_flags"`      // extra flags
+	Vaults       map[string]store.Vault `json:"vaults"`
+	DefaultVault string                 `json:"default_vault"`
 }
 
-// Path returns the config file path: ARK_CONFIG, else ~/.arkadian/config.json.
 func Path() string {
-	if p := os.Getenv("ARK_CONFIG"); p != "" {
-		return p
+	if value := os.Getenv("ARK_CONFIG"); value != "" {
+		return Expand(value)
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".arkadian", "config.json")
 }
 
-// Load reads the config, bootstrapping a default file on first use.
+func InventoryPath() string { return filepath.Join(filepath.Dir(Path()), "models.json") }
+
+func Expand(value string) string {
+	if value == "~" || strings.HasPrefix(value, "~/") {
+		home, _ := os.UserHomeDir()
+		if value == "~" {
+			return home
+		}
+		return filepath.Join(home, strings.TrimPrefix(value, "~/"))
+	}
+	return value
+}
+
+func HFCache() string {
+	for _, name := range []string{"HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"} {
+		if value := os.Getenv(name); value != "" {
+			return Expand(value)
+		}
+	}
+	if value := os.Getenv("HF_HOME"); value != "" {
+		return filepath.Join(Expand(value), "hub")
+	}
+	cache := os.Getenv("XDG_CACHE_HOME")
+	if cache == "" {
+		cache = Expand("~/.cache")
+	}
+	return filepath.Join(Expand(cache), "huggingface", "hub")
+}
+
+func Default() *Config {
+	return &Config{DefaultVault: "hfcache", Vaults: map[string]store.Vault{
+		"hfcache": {Name: "hfcache", Type: "huggingface", Path: HFCache()},
+	}}
+}
+
 func Load() (*Config, error) {
-	b, err := os.ReadFile(Path())
+	data, err := os.ReadFile(Path())
 	if os.IsNotExist(err) {
-		c := Default()
-		_ = c.Save()
-		c.applyDefaults() // expand ~ now: the first run must not write to "./~"
-		return c, nil
+		result := Default()
+		if err := result.Validate(); err != nil {
+			return nil, err
+		}
+		return result, result.Save()
 	}
 	if err != nil {
 		return nil, err
 	}
-	var c Config
-	if err := json.Unmarshal(b, &c); err != nil {
+	var result Config
+	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, err
 	}
-	c.applyDefaults()
-	return &c, nil
-}
-
-// Default is the out-of-the-box config: one local vault. A cold vault is yours
-// to name, so ark does not guess a host: ark vault add nas <user@host> <path>.
-func Default() *Config {
-	return &Config{
-		Vaults: map[string]store.Vault{
-			"spark": {Name: "spark", Kind: "local", Path: defaultLocalRoot},
-		},
-		DefaultTo:  "spark",
-		RsyncFlags: defaultRsyncFlags,
+	if err := result.Validate(); err != nil {
+		return nil, err
 	}
+	return &result, nil
 }
 
-// Save writes the config to Path().
-func (c *Config) Save() error {
-	p := Path()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+func (config *Config) Validate() error {
+	if len(config.Vaults) == 0 {
+		return fmt.Errorf("no vaults configured; register your HF cache")
+	}
+	for name, vault := range config.Vaults {
+		if err := store.ValidateName(name); err != nil {
+			return err
+		}
+		vault.Name = name
+		if vault.Path == "" {
+			return fmt.Errorf("vault %s has no path", name)
+		}
+		if !vault.Remote() {
+			var err error
+			vault.Path, err = filepath.Abs(Expand(vault.Path))
+			if err != nil {
+				return err
+			}
+		}
+		if err := vault.Validate(); err != nil {
+			return fmt.Errorf("vault %s: %w", name, err)
+		}
+		config.Vaults[name] = vault
+	}
+	if _, exists := config.Vaults[config.DefaultVault]; !exists {
+		return fmt.Errorf("default_vault %q is not configured", config.DefaultVault)
+	}
+	if config.Vaults[config.DefaultVault].Remote() {
+		return fmt.Errorf("default_vault must be accessible on this machine")
+	}
+	return nil
+}
+
+func (config *Config) Save() error {
+	if err := config.Validate(); err != nil {
 		return err
 	}
-	b, _ := json.MarshalIndent(c, "", "  ")
-	return os.WriteFile(p, b, 0o644)
+	return store.AtomicJSON(Path(), config)
 }
 
-func (c *Config) applyDefaults() {
-	if c.Vaults == nil {
-		c.Vaults = map[string]store.Vault{}
-	}
-	for n, v := range c.Vaults {
-		v.Name = n
-		if v.Kind == "" {
-			v.Kind = "local"
-		}
-		v.Path = Expand(v.Path)
-		c.Vaults[n] = v
-	}
-	if c.RsyncFlags == "" {
-		c.RsyncFlags = defaultRsyncFlags
-	}
-}
-
-// Vault resolves a vault by name ("" = defaultTo).
-func (c *Config) Vault(name string) (store.Vault, error) {
+func (config *Config) Vault(name string) (store.Vault, error) {
 	if name == "" {
-		name = c.DefaultTo
+		name = config.DefaultVault
 	}
-	v, ok := c.Vaults[name]
-	if !ok {
-		return store.Vault{}, errNotFound(name)
+	vault, exists := config.Vaults[name]
+	if !exists {
+		return vault, fmt.Errorf("unknown vault %q; run: ark vault ls", name)
 	}
-	return v, nil
+	return vault, nil
 }
 
-// EnsureRemote prepares a remote vault: creates its models dir over ssh.
-func EnsureRemote(v store.Vault, ssh func(host, cmd string) (string, error)) error {
-	if !v.Remote() {
-		return os.MkdirAll(v.ModelsDir(), 0o755)
+func ParseLocation(name, location string) (store.Vault, error) {
+	vault := store.Vault{Name: name, Type: "huggingface"}
+	if strings.Contains(location, "://") {
+		parsed, err := url.Parse(location)
+		if err != nil || parsed.Scheme != "ssh" || parsed.Host == "" || parsed.Path == "" || parsed.Port() != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return vault, fmt.Errorf("use a mounted path, host:/path, or ssh://host/path; configure SSH ports in ~/.ssh/config")
+		}
+		if parsed.User != nil {
+			if _, password := parsed.User.Password(); password {
+				return vault, fmt.Errorf("configure SSH keys, not passwords in vault locations")
+			}
+			vault.Host = parsed.User.Username() + "@"
+		}
+		vault.Host += parsed.Host
+		vault.Path = parsed.Path
+	} else if host, remotePath, found := strings.Cut(location, ":"); found && !strings.HasPrefix(location, "/") {
+		vault.Host, vault.Path = host, remotePath
+	} else {
+		if location == "" {
+			return vault, fmt.Errorf("vault location is empty")
+		}
+		var err error
+		vault.Path, err = filepath.Abs(Expand(location))
+		if err != nil {
+			return vault, err
+		}
 	}
-	_, err := ssh(v.Host, "mkdir -p "+v.ModelsDir())
-	return err
+	return vault, vault.Validate()
 }
-
-// Expand expands a leading ~ in paths.
-func Expand(p string) string {
-	if len(p) > 1 && p[:2] == "~/" {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, p[2:])
-	}
-	return p
-}
-
-type notFound string
-
-func (e notFound) Error() string { return "vault not found: " + string(e) }
-
-func errNotFound(name string) error { return notFound(name) }

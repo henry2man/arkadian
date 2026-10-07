@@ -1,78 +1,63 @@
 # AGENTS.md
 
-Instructions for AI agents that work in this repository.
-Write new documentation in English. Use ASD-STE100 Simplified Technical English:
-short sentences, active voice, one instruction per sentence.
+Write documentation in English. Use ASD-STE100 Simplified Technical English.
+Keep sentences short and active.
 
-## The Project
+## Project
 
-The project is Arkadian. The command is `ark`. Keep it that way: do not rename the
-binary, `ARK_CONFIG`, `~/.arkadian/config.json`, or `.arkmeta.json`.
+Arkadian is a small Go CLI for model inventory and safe storage operations.
+The command is `ark`. Keep `ARK_CONFIG`, `~/.arkadian/config.json`, and
+`.arkmeta.json`. PLAN.md is the only task list. README.md holds future ideas.
 
-`ark` is a single-binary CLI in Go. It keeps Hugging Face models in local and
-remote vaults. See README.md for the full design and TODO.md for open ideas.
+Work on first-implementation. The current goal stops before the website.
+Website follows validation. Homebrew release is the final V1 phase.
 
-Install Go 1.27.1 or higher from https://go.dev/dl. Nothing else: `go.mod` pins
-the version and `GOTOOLCHAIN=auto` handles the rest.
+## Tools and checks
 
-## Commands
+Use Go 1.27.1 or later. Install with Homebrew when needed. Runtime tests require
+HF CLI (tested with 1.5.0), Python 3.9+, rsync, and ssh. No external Go modules.
 
 ```bash
-go build -o bin/ark ./cmd/ark   # build
-./bin/ark version               # run it
-gofmt -l .                      # format check; the output must be empty
-go vet ./...                    # static check
-go test ./...                   # there are no test files yet
+gofmt -w cmd internal
+go vet ./...
+go test ./...
+go build -o bin/ark ./cmd/ark
+./bin/ark version
 ```
 
-CI runs these checks on every push (`.github/workflows/ci.yml`).
+Use RED/GREEN for behavior changes. Leave a small runnable test for nontrivial
+logic. Before finishing, run format, vet, tests, build, and a real local-cache
+command. Report actual checks and skipped hardware checks separately.
 
 ## Structure
 
-| Path | Content |
+| Path | Responsibility |
 |---|---|
-| `cmd/ark/main.go` | argument parsing and all subcommands |
-| `internal/config` | `~/.arkadian/config.json` load/save and defaults (`ARK_CONFIG` overrides the path) |
-| `internal/source` | download sources: `hf`, `hf_transfer`, `obscura`, `modelscope` |
-| `internal/store` | vault paths, slugs, `.arkmeta.json` metadata, size, sha256, copy |
-
-Add new subcommands in `cmd/ark/main.go`. Put reusable logic in `internal/`.
+| cmd/ark/main.go | Arguments, command coordination, display, per-config lock |
+| internal/config | Config, HF cache detection, vault location parsing |
+| internal/source | HF source URI and download commands |
+| internal/store | Native caches, inventory, manifests, transfers, space |
 
 ## Rules
 
-1. Do not add external Go modules. The binary stays dependency-free.
-2. Do not change the on-disk layout. A vault directory must stay valid as a
-   Hugging Face `--local-dir` path.
-3. Run external tools with `run()` (local) and `sshRun()` (remote). `ssh` uses
-   BatchMode: never ask for a password.
-4. Download into staging first, then move the files into the vault.
-5. Report errors with `die()` and `errHint()`. Do not panic.
-6. Do not commit `bin/`, `*.test`, or `vendor/`.
-7. Write the least code that works. This project uses Ponytail: see the ladder in
-   README.md. Do not add an abstraction nobody asked for. Mark a deliberate
-   shortcut with a `// ponytail:` comment that names the ceiling and the fix.
-8. The command set is the API: `list`, `download`, `load`, `mv`, `rm`, `path`,
-   `link`, `unlink`, `verify`, `info`, `vault`, `version`. Three actions lead:
-   conserve (`download`), manage space (`list`, `rm`, `mv`), make available here
-   (`load`). No aliases, no second verb for one job, no flags that repeat another
-   command. A new verb needs a job these cannot do. PLAN.md holds the reasoning.
-9. `ark load` needs its mode: `--link` or `--copy`. `--copy` checks room first and
-   stops past 90% used (`maxUse` in `cmd/ark/main.go`); `--force` overrides. Keep
-   that number in code, not in the config.
+1. Write the least code that works. Reuse existing functions and the platform.
+2. Delegate download/cache commands to HF. Delegate transport to rsync and SSH.
+3. Keep native HF layout. Never silently migrate an old Arkadian directory.
+4. Every vault has an explicit huggingface type. Reject unsupported providers.
+5. Run external tools through store.Run and store.Command. Quote remote argv.
+   SSH uses BatchMode. Do not ask for passwords or configure the operating system.
+6. Publish transfers only after verification. Recheck source before deletion.
+7. Do not count references as independent copies. Never delete a link target.
+8. Preserve the API in PLAN.md. No model aliases, duplicate verbs, or transfer
+   flags that repeat positional arguments. Retired commands explain replacements.
+9. Keep the 90% space limit in code. Force does not bypass integrity or conflicts.
+10. Fail with an actionable error. Do not panic. Invalid usage exits 2.
+11. Mark a deliberate real shortcut with a ponytail comment naming its ceiling
+    and upgrade path. Do not add abstractions for hypothetical future providers.
+12. Do not commit bin/, dist/, test binaries, or vendor/. Do not add license headers.
 
-## Releases
+## Release
 
-Nothing is published yet. The repo is private and the release pipeline is idle.
-`ci.yml` still checks every push. See the README for the steps to switch
-publishing on. TODO.md lists the open ideas.
-
-Do not add version numbers in the code. `main.version` comes from a git tag.
-Do not add a release note file: GoReleaser builds the change log from commits.
-
-## Before You Finish
-
-1. Run `gofmt -w .`.
-2. Run `go vet ./...` and `go build -o bin/ark ./cmd/ark`.
-3. Run the command that you changed against a local vault.
-4. Report the exact commands and their real output. If you did not run them,
-   say so.
+Do not publish, commit, merge, or change repository visibility as part of CLI
+implementation. Keep releases idle until the planned validation gates pass.
+Versions come from tags. GoReleaser generates change logs from commits.
