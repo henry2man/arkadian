@@ -710,9 +710,9 @@ func (application *app) list(args []string, flags map[string]string) error {
 		vault := application.configuration.Vaults[name]
 		total, free, err := store.Space(vault)
 		if err != nil {
-			fmt.Fprintf(application.output, "%s: space unavailable\n", name)
+			fmt.Fprintf(application.output, "%s %s: space unavailable\n", name, vault.URL())
 		} else {
-			fmt.Fprintf(application.output, "%s: %s free / %s total\n", name, humanBytes(free), humanBytes(total))
+			fmt.Fprintf(application.output, "%s %s: %s free / %s total\n", name, vault.URL(), humanBytes(free), humanBytes(total))
 		}
 	}
 	singles, outside := 0, 0
