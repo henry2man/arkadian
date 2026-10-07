@@ -77,7 +77,7 @@ func main() {
 		cmdInfo(rest)
 	case "vault":
 		cmdVault(rest)
-	case "help", "--help":
+	case "help", "--help", "-h":
 		usage()
 	default:
 		if use, gone := removed[cmd]; gone {

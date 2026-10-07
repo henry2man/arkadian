@@ -130,7 +130,11 @@ Ten commands, no aliases, no second way to do the same thing.
 - The vault is named, never guessed: a missing `--from` or `--to` stops and says
   `Run: ark vault ls`.
 - Errors go to stderr and exit 1. Bad usage exits 2. `--help` exits 0.
-- Paths in a flag are accepted too: `--to /mnt/usb` needs no config entry.
+- A vault location is a path, `host:/path`, or `ssh://user@host/path`, in
+  `ark vault add` and in `--from` / `--to`. `smb://` and `nfs://` are refused:
+  ark reads a mounted path, it does not speak those protocols.
+- A removed command prints the one that replaces it. `ark promote` says to run
+  `ark mv`. Nothing fails with a shrug.
 
 ### Example flow
 
