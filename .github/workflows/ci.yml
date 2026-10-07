@@ -34,7 +34,14 @@ jobs:
         run: go vet ./...
 
       - name: test
-        run: go test ./...
+        run: |
+          out=$(go test ./... 2>&1); status=$?
+          if [ $status -ne 0 ]; then
+            printf '%s\n' "$out" | tail -30 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+          fi
+          exit $status
 
       - name: build
         run: go build -o bin/ark ./cmd/ark
