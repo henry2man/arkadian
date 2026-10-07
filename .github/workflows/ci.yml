@@ -10,17 +10,19 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       HF_HUB_OFFLINE: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      # No go.sum: the project has no external Go modules, so there is nothing to cache.
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          cache: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
