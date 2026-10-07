@@ -15,8 +15,8 @@ Website follows validation. Homebrew release is the final V1 phase.
 ## Tools and checks
 
 Use Go 1.27.1 or later. Install with Homebrew when needed. Runtime tests require
-HF CLI (tested with 1.5.0), Python 3.9+, GNU rsync 3 or later, and ssh. macOS
-ships openrsync, which lacks `rsync -s`, so run `brew install rsync` there.
+HF CLI (tested with 1.5.0 and 2.1.1), Python 3.9+, GNU rsync 3 or later, and ssh.
+macOS ships openrsync, which lacks `rsync -s`, so run `brew install rsync` there.
 No external Go modules.
 
 CI runs `scripts/test.sh` on ubuntu-latest. Run the same script on any machine.

@@ -75,3 +75,40 @@ func TestReferencesAndBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedBlobStoreLinksTransfer(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "cache")
+	source := fixture(t, root)
+	repo := source.ModelDir("org/model")
+	shared := filepath.Join(root, "blobs", "72")
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blob := filepath.Join(shared, strings.Repeat("7", 64))
+	if err := os.WriteFile(blob, []byte("weight bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(repo, "blobs", "weights")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../blobs/72/"+strings.Repeat("7", 64), filepath.Join(repo, "blobs", "weights")); err != nil {
+		t.Fatal(err)
+	}
+	destination := Vault{Name: "destination", Type: "huggingface", Path: filepath.Join(t.TempDir(), "destination")}
+	if err := Transfer("org/model", source, destination, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(destination, "org/model"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(destination.ModelDir("org/model"), "blobs", "weights"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("shared blob stayed a link and points to nothing in the destination vault")
+	}
+	if _, err = os.Stat(filepath.Join(destination.ModelDir("org/model"), "snapshots", strings.Repeat("a", 40), "weights.bin")); err != nil {
+		t.Fatal("intra-repository link lost", err)
+	}
+}

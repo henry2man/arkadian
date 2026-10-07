@@ -492,7 +492,7 @@ func Transfer(repo string, source, destination Vault, move, force bool) error {
 		if err := helper(destination, "mkdir", stageVault.ModelDir(repo), nil, nil); err != nil {
 			return err
 		}
-		args := []string{"-a", "-s", "--checksum", "--partial", "--delete", "--exclude=.arkmeta.json", "--exclude=*.incomplete", "--exclude=*.lock", "--exclude=*.tmp", "--exclude=.locks", "--", source.ModelDir(repo) + "/", stageVault.ModelDir(repo) + "/"}
+		args := []string{"-a", "-s", "--checksum", "--partial", "--delete", "--copy-unsafe-links", "--exclude=.arkmeta.json", "--exclude=*.incomplete", "--exclude=*.lock", "--exclude=*.tmp", "--exclude=.locks", "--", source.ModelDir(repo) + "/", stageVault.ModelDir(repo) + "/"}
 		if source.Remote() && destination.Remote() {
 			args[len(args)-1] = destination.Host + ":" + stageVault.ModelDir(repo) + "/"
 			args = append([]string{"-e", "ssh -o BatchMode=yes -o ConnectTimeout=10"}, args...)

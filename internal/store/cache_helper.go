@@ -17,6 +17,8 @@ def identity():
 
 def payload(hashing=False):
     real = root.resolve(strict=True)
+    base = os.path.normpath(str(root))  # one-hop link test, before the symlink chain resolves
+    shared = (root.parent / "blobs").resolve()  # hf 2.x shared blob store, sibling of the repository
     snapshots = root / "snapshots"
     if not snapshots.is_dir() or snapshots.is_symlink():
         raise ValueError("not a native HF model cache: " + str(root))
@@ -35,17 +37,23 @@ def payload(hashing=False):
             if relative == ".arkmeta.json" or name == ".DS_Store" or name.endswith((".incomplete", ".lock", ".tmp")):
                 continue
             resolved = path.resolve(strict=True)
-            if not resolved.is_relative_to(real):
+            if not resolved.is_relative_to(real) and not resolved.is_relative_to(shared):
                 raise ValueError("file points outside its repository: " + relative)
             info = path.stat()
             if not stat.S_ISREG(info.st_mode):
                 raise ValueError("not a regular file: " + relative)
+            shared_link = False
             if path.is_symlink():
                 target = os.readlink(path)
                 if os.path.isabs(target):
                     raise ValueError("absolute snapshot links cannot be transported: " + relative)
-                links[relative] = target
-            else:
+                first = os.path.normpath(os.path.join(current, target))
+                if first == base or first.startswith(base + os.sep):
+                    links[relative] = target
+                else:
+                    shared_link = True  # hf 2.x shared blob: the transfer writes real bytes
+            if not path.is_symlink() or shared_link:
+                entry = {"size": info.st_size}
                 if hashing:
                     digest = hashlib.sha256()
                     with path.open("rb") as source:
@@ -54,9 +62,8 @@ def payload(hashing=False):
                     after = path.stat()
                     if (info.st_size, info.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                         raise ValueError("source changed while hashing: " + relative)
-                    files[relative] = {"size": info.st_size, "sha256": digest.hexdigest()}
-                else:
-                    files[relative] = {"size": info.st_size}
+                    entry["sha256"] = digest.hexdigest()
+                files[relative] = entry
             stamps[relative] = [info.st_size, info.st_mtime_ns, links.get(relative, "")]
     return {"revisions": revisions, "files": files, "links": links}, stamps
 

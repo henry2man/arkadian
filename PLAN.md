@@ -169,7 +169,11 @@ from `brew install rsync`. ark rejects openrsync, the macOS default, and names t
 command in the error. Transfers pass `rsync -s`, so paths with spaces need no manual
 quoting. Install `click` by hand with pip: the `cli` extra does not exist in
 huggingface_hub 1.5.0, and typer 0.27 dropped click. Homebrew also ships an `hf`
-formula, version 2.1.1.
+formula, version 2.1.1. With HF CLI 2.x, Xet files live in the cache-wide shared blob
+store and the repository holds a link. Arkadian hashes that content, transfers real
+bytes with `--copy-unsafe-links`, and leaves the destination vault self-contained.
+Deletion stays with `hf cache rm`, so shared bytes survive. No legacy mode flag is
+set.
 
 Kept simple on purpose: one CI job, no container, no macOS runner, and one lock per
 config file. Add a platform job when a real platform breaks.
