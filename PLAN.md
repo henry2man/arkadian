@@ -156,6 +156,29 @@ Hub authenticity. Transfer verification proves destination byte identity.
 Path selects an explicit revision, then a cached main ref, then a sole revision.
 Otherwise require `--rev`. A remote path is an SSH location, not a local mount.
 
+## Memento — 2026-10-07
+
+Built: the command set in the API table, HF cache discovery, native cache layout,
+inventory with per-revision manifests, offline `verify`, additive `sync`, resumable
+verified transfers, last-copy protection, and the 90 percent space guard. Tests use
+the standard library only. No external Go modules.
+
+Checked: `scripts/test.sh` passes in CI on ubuntu-latest (Go 1.27.1, GNU rsync 3.2.7,
+HF CLI 1.5.0) in run 37604786566. The same script passes on macOS with GNU rsync 3.5.1
+from `brew install rsync`. ark rejects openrsync, the macOS default, and names that
+command in the error. Transfers pass `rsync -s`, so paths with spaces need no manual
+quoting. Install `click` by hand with pip: the `cli` extra does not exist in
+huggingface_hub 1.5.0, and typer 0.27 dropped click. Homebrew also ships an `hf`
+formula, version 2.1.1.
+
+Kept simple on purpose: one CI job, no container, no macOS runner, and one lock per
+config file. Add a platform job when a real platform breaks.
+
+Remaining: hardware validation on Spark, USB, and NAS with one large model and a live
+runtime (last Phase 4 item). Then the website (Phase 5) and the release with Homebrew
+(Phase 6). Do not publish before that Phase 4 gate passes. The repository is
+`arkadian`; the command is `ark`.
+
 ## Ordered Work
 
 ### Phase 1 — Contract and documentation
@@ -188,7 +211,7 @@ Otherwise require `--rev`. A remote path is an SSH location, not a local mount.
 - [x] Run gofmt, go vet, go test, build, and a temporary-vault end-to-end flow.
 - [x] Make CI check first-implementation and main. Cross-build supported targets.
 - [x] Record real checks and simulated checks separately.
-- [ ] Run scripts/test.sh in CI on ubuntu-latest. On macOS install GNU rsync
+- [x] Run scripts/test.sh in CI on ubuntu-latest. On macOS install GNU rsync
       with `brew install rsync`; ark rejects openrsync.
 - [ ] Validate Spark/USB/NAS when available. Exercise a large model and an
       inference runtime. These hardware checks were not available in this run.
