@@ -254,7 +254,11 @@ func (application *app) refresh(names ...string) error {
 			continue
 		}
 		if state := application.inventory.Vaults[name]; state != nil && len(state.Skipped) > 0 {
-			fmt.Fprintf(application.diagnostics, "%s: ignored %d entry without a snapshot; resume it with hf download\n", name, len(state.Skipped))
+			noun := "entry"
+			if len(state.Skipped) > 1 {
+				noun = "entries"
+			}
+			fmt.Fprintf(application.diagnostics, "%s: ignored %d %s without a snapshot; see ark list --json vaults.%s.skipped\n", name, len(state.Skipped), noun, name)
 		}
 	}
 	if err := application.save(); err != nil {
