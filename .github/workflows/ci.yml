@@ -37,11 +37,9 @@ jobs:
         run: |
           out=$(go test ./... 2>&1); status=$?
           if [ $status -ne 0 ]; then
-            n=0
-            printf '%s\n' "$out" | tail -40 | while IFS= read -r line; do
-              n=$((n+1)); printf '::error::L%s[0123456789abcdefghijklmnopqrstuvwxyz] %s\n' "$n" "$line"
+            printf '%s\n' "$out" | tail -30 | while IFS= read -r line; do
+              echo "::error::${line}"
             done
-            sleep 20
           fi
           exit $status
 
