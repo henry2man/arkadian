@@ -638,10 +638,12 @@ func (application *app) list(args []string, flags map[string]string) error {
 		return encoder.Encode(filtered)
 	}
 	writer := tabwriter.NewWriter(application.output, 0, 4, 2, ' ', 0)
+	alone := map[string]bool{}
 	fmt.Fprint(writer, "MODEL\tREVISION\tSIZE")
 	for _, name := range names {
 		fmt.Fprintf(writer, "\t%s", name)
 	}
+	fmt.Fprint(writer, "\tCOPIES")
 	fmt.Fprintln(writer)
 	repos := []string{}
 	for repo := range filtered.Models {
@@ -662,6 +664,19 @@ func (application *app) list(args []string, flags map[string]string) error {
 		sort.Strings(commits)
 		for _, commit := range commits {
 			fmt.Fprintf(writer, "%s\t%.12s\t%s", repo, commit, humanBytes(revisions[commit]))
+			identities, references := map[string]bool{}, 0
+			for _, location := range filtered.Models[repo] {
+				for _, revision := range location.Model.Revisions {
+					if revision.Revision != commit {
+						continue
+					}
+					if location.Model.Reference {
+						references++
+					} else if !slices.Contains([]string{"missing", "unknown", "corrupt"}, location.State) {
+						identities[location.Model.Identity] = true
+					}
+				}
+			}
 			for _, name := range names {
 				state := "-"
 				if location := filtered.Models[repo][name]; location != nil {
@@ -674,6 +689,15 @@ func (application *app) list(args []string, flags map[string]string) error {
 				}
 				fmt.Fprintf(writer, "\t%s", state)
 			}
+			if len(identities) == 0 && references > 0 {
+				fmt.Fprint(writer, "\tref")
+				alone[repo] = true
+			} else {
+				fmt.Fprintf(writer, "\t%d", len(identities))
+				if len(identities) < 2 {
+					alone[repo] = true
+				}
+			}
 			fmt.Fprintln(writer)
 		}
 	}
@@ -681,6 +705,7 @@ func (application *app) list(args []string, flags map[string]string) error {
 		return err
 	}
 	fmt.Fprintln(application.output, "\npresent = observed; verified = last checksum check; reference = no independent copy; unknown = unavailable; missing = absent; corrupt = failed check")
+	fmt.Fprintln(application.output, "copies = independent copies of that artifact; ref = references only, and references are not copies")
 	for _, name := range names {
 		vault := application.configuration.Vaults[name]
 		total, free, err := store.Space(vault)
@@ -690,26 +715,41 @@ func (application *app) list(args []string, flags map[string]string) error {
 			fmt.Fprintf(application.output, "%s: %s free / %s total\n", name, humanBytes(free), humanBytes(total))
 		}
 	}
+	singles, outside := 0, 0
 	for _, repo := range repos {
-		independent := map[string]bool{}
+		if alone[repo] {
+			singles++
+		}
 		working := false
 		for name, location := range application.inventory.Models[repo] {
-			if location.State == "missing" || location.State == "unknown" || location.State == "corrupt" {
+			if name != application.configuration.DefaultVault || location.Model == nil {
 				continue
 			}
-			if !location.Model.Reference {
-				independent[location.Model.Identity] = true
-			}
-			if name == application.configuration.DefaultVault {
+			if !slices.Contains([]string{"missing", "unknown", "corrupt"}, location.State) {
 				working = true
 			}
 		}
-		if len(independent) < 2 {
-			fmt.Fprintf(application.output, "%s: no other known independent copy\n", repo)
-		}
 		if !working {
-			fmt.Fprintf(application.output, "%s: not in %s; use ark get\n", repo, application.configuration.DefaultVault)
+			outside++
 		}
+	}
+	if singles > 0 {
+		noun, have := "models", "have"
+		if singles == 1 {
+			noun, have = "model", "has"
+		}
+		if len(application.configuration.Vaults) < 2 {
+			fmt.Fprintf(application.output, "%s is the only vault; %d %s %s one copy. Add a vault with: ark vault add <name> <location>\n", application.configuration.DefaultVault, singles, noun, have)
+		} else {
+			fmt.Fprintf(application.output, "%d %s %s one copy; add one with: ark cp <model> <source> <destination>\n", singles, noun, have)
+		}
+	}
+	if outside > 0 {
+		noun, are := "models", "are"
+		if outside == 1 {
+			noun, are = "model", "is"
+		}
+		fmt.Fprintf(application.output, "%d %s %s not in %s; bring one in with: ark get <model>\n", outside, noun, are, application.configuration.DefaultVault)
 	}
 	if len(unreadable) > 0 {
 		return fmt.Errorf("incomplete inventory; %s: run: ark refresh", strings.Join(unreadable, ", "))

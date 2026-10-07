@@ -215,6 +215,8 @@ steps and the initial website.
 - OCI/Ollama sources and S3-compatible storage.
 - Replica policies, jobs/resume, and garbage collection.
 - Advanced hash caching and a diagnostic command.
+- The vault path in the `ark list` footer, so two vaults on one disk are easy to
+  tell apart. `ark vault ls` and `list --json` already show it.
 - Additional website languages after the initial page.
 
 ## Thanks

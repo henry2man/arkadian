@@ -120,3 +120,17 @@ func TestUnknownCommandHint(t *testing.T) {
 		t.Fatalf("stderr %q, want a pull hint", errOut.String())
 	}
 }
+
+func TestListAggregatesCopyHints(t *testing.T) {
+	cliFixture(t)
+	output, _ := call(t, 0, "list")
+	if !strings.Contains(output, "COPIES") {
+		t.Fatalf("no copies column:\n%s", output)
+	}
+	if strings.Contains(output, "no other known independent copy") {
+		t.Fatalf("per-model copy hint returned:\n%s", output)
+	}
+	if count := strings.Count(output, "one copy"); count != 1 {
+		t.Fatalf("%d copy hints, want one line:\n%s", count, output)
+	}
+}
